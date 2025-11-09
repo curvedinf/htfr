@@ -65,6 +65,11 @@ class HTFRBenchmarkConfig:
     eta_g: float
     tau: float = 1.0
 
+def log(message: str) -> None:
+    """Print ``message`` with flushing so progress is visible immediately."""
+
+    print(message, flush=True)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -336,6 +341,7 @@ def main() -> None:
     ensure_authentication(args.hf_token)
 
     try:
+        log(f"Loading teacher model {args.model}...")
         tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
         model = AutoModelForCausalLM.from_pretrained(args.model, token=args.hf_token)
     except OSError as exc:  # pragma: no cover - depends on external auth
@@ -347,7 +353,12 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
+    log(f"Teacher model ready on {device}.")
 
+    log(
+        f"Loading dataset {args.dataset} ({args.dataset_config}) with train/eval token targets "
+        f"{args.train_tokens}/{args.eval_tokens}..."
+    )
     dataset = load_dataset(args.dataset, args.dataset_config)
     train_tokens = build_token_stream(
         dataset["train"]["text"], tokenizer, args.train_tokens + args.seq_len + 1
@@ -356,6 +367,7 @@ def main() -> None:
         dataset["validation"]["text"], tokenizer, args.eval_tokens + args.seq_len + 1
     )
 
+    log("Collecting teacher outputs for training split...")
     train_hidden, _, train_targets = collect_teacher_outputs(
         model,
         train_tokens,
@@ -365,6 +377,8 @@ def main() -> None:
         device=device,
         collect_logits=False,
     )
+    log(f"Collected {train_hidden.shape[0]} training examples with hidden size {train_hidden.shape[1]}.")
+    log("Collecting teacher outputs for evaluation split...")
     eval_hidden, eval_logits, eval_targets = collect_teacher_outputs(
         model,
         eval_tokens,
@@ -375,19 +389,28 @@ def main() -> None:
         collect_logits=True,
     )
     assert eval_logits is not None
+    log(f"Collected {eval_hidden.shape[0]} evaluation examples.")
 
+    log(f"Building truncated vocabulary with limit {args.vocab_limit}...")
     mapping, shortlist = build_vocab_mapping(train_targets, tokenizer.vocab_size, args.vocab_limit)
     num_classes = shortlist.numel() + 1
     unk_index = num_classes - 1
+    log(f"Shortlist size: {shortlist.numel()} tokens (+UNK index {unk_index}).")
 
     train_targets_compact = mapping[train_targets].numpy()
     eval_targets_compact = mapping[eval_targets].numpy()
 
     teacher_ppl = truncated_teacher_perplexity(eval_logits, eval_targets, shortlist, mapping)
+    log(f"Teacher truncated perplexity: {teacher_ppl:.3f}")
 
     train_hidden_np = train_hidden.numpy().astype(np.float32)
     eval_hidden_np = eval_hidden.numpy().astype(np.float32)
 
+    log(
+        "Initializing HyperTensors from {:d} samples...".format(
+            min(args.init_samples, train_hidden_np.shape[0])
+        )
+    )
     base_tensors = initialize_htfr(
         train_hidden_np,
         train_targets_compact,
@@ -397,9 +420,19 @@ def main() -> None:
         tau=1.0,
         seed=args.seed,
     )
+    log(f"Initialization produced {len(base_tensors)} HyperTensors.")
 
     results = []
     for config in make_default_configs():
+        log(
+            "Training HTFR configuration '{name}' (top_k={top_k}, weight_mode={weight_mode}, eta={eta}, eta_g={eta_g})...".format(
+                name=config.name,
+                top_k=config.top_k,
+                weight_mode=config.weight_mode,
+                eta=config.eta,
+                eta_g=config.eta_g,
+            )
+        )
         model_tensors = [tensor.clone() for tensor in base_tensors]
         htfr_model = HTFRModel(
             tensors=model_tensors,
@@ -411,6 +444,7 @@ def main() -> None:
         train_htfr(htfr_model, train_hidden_np, train_targets_compact)
         ppl = evaluate_htfr(htfr_model, eval_hidden_np, eval_targets_compact)
         results.append({"config": config.name, "perplexity": ppl})
+        log(f"Finished '{config.name}' with perplexity {ppl:.3f}.")
 
     print("Gemma 3 (truncated) perplexity: {:.3f}".format(teacher_ppl))
     for entry in results:
