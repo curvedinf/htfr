@@ -6,6 +6,35 @@ HTFR is a fast, differentiable regression framework for very high-dimensional in
 
 ---
 
+## Gemma 3 Benchmark
+
+The repository now includes a reproducible benchmark that compares HTFR
+against the gated `google/gemma-3-270m` reference model. The script lives
+under [`examples/gemma3_benchmark.py`](examples/gemma3_benchmark.py) and
+produces truncated-vocabulary perplexity numbers for several HTFR
+configurations while using Gemma as the teacher.
+
+To run the benchmark you must:
+
+1. Accept the Gemma 3 license on Hugging Face and obtain an access token.
+2. Install the optional ``benchmark`` dependency set:
+
+   ```bash
+   pip install .[benchmark]
+   ```
+
+3. Execute the benchmark, providing the Hugging Face token either via the
+   ``--hf-token`` flag or the ``HF_TOKEN`` environment variable:
+
+   ```bash
+   python examples/gemma3_benchmark.py --hf-token <HF_TOKEN>
+   ```
+
+Use ``--help`` for additional customization options such as dataset
+size, vocabulary truncation, and the evaluation output path.
+
+---
+
 ## 1. HyperTensor Primitive
 
 - **Domain/Range.** Input \(x\in\mathbb{R}^D\), output \(y\in\mathbb{R}^M\).
