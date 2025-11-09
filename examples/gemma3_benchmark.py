@@ -38,20 +38,29 @@ import os
 import pathlib
 import sys
 from dataclasses import dataclass
-from typing import Iterable, List
+from typing import List
 
 import numpy as np
 import torch
-from datasets import load_dataset
-from huggingface_hub import login
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from htfr.feature_ops import apply_block_srht
+from htfr.gemma import (
+    build_token_stream,
+    build_vocab_mapping,
+    collect_teacher_outputs,
+    ensure_authentication,
+    load_gemma_model,
+    load_wikitext,
+    log,
+    truncated_teacher_perplexity,
+)
 from htfr.initialization import initialize_hypertensors
 from htfr.model import HTFRModel
+from htfr.serialization import load_htfr_checkpoint
 
 
 @dataclass(frozen=True)
@@ -64,12 +73,6 @@ class HTFRBenchmarkConfig:
     eta: float
     eta_g: float
     tau: float = 1.0
-
-def log(message: str) -> None:
-    """Print ``message`` with flushing so progress is visible immediately."""
-
-    print(message, flush=True)
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -162,122 +165,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional JSON path for dumping benchmark results",
     )
+    parser.add_argument(
+        "--test-model",
+        type=str,
+        default=None,
+        help="Optional path to a pre-trained HTFR checkpoint to evaluate",
+    )
     return parser.parse_args()
-
-
-def ensure_authentication(token: str | None) -> None:
-    """Log into Hugging Face if a token is provided."""
-
-    if token:
-        login(token=token, add_to_git_credential=False)
-
-
-def build_token_stream(
-    dataset_split: Iterable[str],
-    tokenizer: AutoTokenizer,
-    token_limit: int,
-) -> torch.Tensor:
-    """Tokenize enough text samples to reach ``token_limit`` tokens."""
-
-    ids: List[int] = []
-    bos_id = getattr(tokenizer, "bos_token_id", None)
-    if bos_id is not None:
-        ids.append(int(bos_id))
-    for text in dataset_split:
-        if not text:
-            continue
-        piece = tokenizer.encode(text, add_special_tokens=False)
-        ids.extend(piece)
-        if len(ids) >= token_limit:
-            break
-    if len(ids) < token_limit:
-        raise RuntimeError(
-            "Unable to gather enough tokens. Try increasing --train-tokens or --eval-tokens"
-        )
-    return torch.tensor(ids[:token_limit], dtype=torch.long)
-
-
-def collect_teacher_outputs(
-    model: AutoModelForCausalLM,
-    tokens: torch.Tensor,
-    seq_len: int,
-    stride: int,
-    max_examples: int | None,
-    device: torch.device,
-    collect_logits: bool,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
-    """Run the teacher model and collect hidden states/targets/(optional) logits."""
-
-    hidden_chunks: List[torch.Tensor] = []
-    logits_chunks: List[torch.Tensor] = []
-    target_chunks: List[torch.Tensor] = []
-    collected = 0
-    upper = len(tokens) - seq_len - 1
-    for start in range(0, max(0, upper) + 1, stride):
-        stop = start + seq_len
-        window = tokens[start:stop].to(device)
-        targets = tokens[start + 1 : stop + 1]
-        if targets.numel() != seq_len:
-            break
-        with torch.no_grad():
-            outputs = model(window.unsqueeze(0), output_hidden_states=True)
-        hidden = outputs.hidden_states[-1][0].detach().cpu()
-        hidden_chunks.append(hidden)
-        target_chunks.append(targets.cpu())
-        if collect_logits:
-            logits = outputs.logits[0].detach().cpu()
-            logits_chunks.append(logits)
-        collected += hidden.shape[0]
-        if max_examples is not None and collected >= max_examples:
-            break
-    if not hidden_chunks:
-        raise RuntimeError("No teacher outputs collected; check token limits and sequence length")
-    hidden = torch.cat(hidden_chunks, dim=0)
-    targets = torch.cat(target_chunks, dim=0)
-    if max_examples is not None:
-        hidden = hidden[:max_examples]
-        targets = targets[:max_examples]
-    logits = None
-    if collect_logits:
-        logits = torch.cat(logits_chunks, dim=0)
-        if max_examples is not None:
-            logits = logits[:max_examples]
-    return hidden, logits, targets
-
-
-def build_vocab_mapping(
-    targets: torch.Tensor,
-    vocab_size: int,
-    vocab_limit: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return (mapping tensor, shortlist ids) for the compact vocabulary."""
-
-    counts = torch.bincount(targets, minlength=vocab_size)
-    topk = torch.topk(counts, k=min(vocab_limit, vocab_size))
-    shortlist = topk.indices
-    unk_index = shortlist.numel()
-    mapping = torch.full((vocab_size,), fill_value=unk_index, dtype=torch.long)
-    mapping[shortlist] = torch.arange(shortlist.numel(), dtype=torch.long)
-    return mapping, shortlist
-
-
-def truncated_teacher_perplexity(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-    shortlist: torch.Tensor,
-    mapping: torch.Tensor,
-) -> float:
-    """Compute perplexity for the teacher model under the truncated vocabulary."""
-
-    probs = torch.softmax(logits, dim=-1)
-    selected = probs.index_select(dim=-1, index=shortlist)
-    other = (1.0 - selected.sum(dim=-1, keepdim=True)).clamp_min(1e-12)
-    compact = torch.cat([selected, other], dim=-1)
-    compact_targets = mapping[targets]
-    idx = torch.arange(compact.size(0))
-    token_probs = compact[idx, compact_targets]
-    nll = -torch.log(token_probs.clamp_min(1e-12))
-    return float(torch.exp(nll.mean()).cpu().item())
 
 
 def log_softmax_np(x: np.ndarray) -> np.ndarray:
@@ -342,8 +236,7 @@ def main() -> None:
 
     try:
         log(f"Loading teacher model {args.model}...")
-        tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
-        model = AutoModelForCausalLM.from_pretrained(args.model, token=args.hf_token)
+        tokenizer, model = load_gemma_model(args.model, args.hf_token)
     except OSError as exc:  # pragma: no cover - depends on external auth
         raise SystemExit(
             "Failed to load the Gemma 3 reference model. Ensure you have accepted "
@@ -359,7 +252,7 @@ def main() -> None:
         f"Loading dataset {args.dataset} ({args.dataset_config}) with train/eval token targets "
         f"{args.train_tokens}/{args.eval_tokens}..."
     )
-    dataset = load_dataset(args.dataset, args.dataset_config)
+    dataset = load_wikitext(args.dataset, args.dataset_config)
     train_tokens = build_token_stream(
         dataset["train"]["text"], tokenizer, args.train_tokens + args.seq_len + 1
     )
@@ -423,6 +316,35 @@ def main() -> None:
     log(f"Initialization produced {len(base_tensors)} HyperTensors.")
 
     results = []
+    if args.test_model:
+        log(f"Loading pre-trained HTFR checkpoint from {args.test_model}...")
+        checkpoint = load_htfr_checkpoint(args.test_model)
+        if checkpoint.mapping.shape[0] != tokenizer.vocab_size:
+            log(
+                "Warning: checkpoint mapping size {} differs from tokenizer vocab {}".format(
+                    checkpoint.mapping.shape[0], tokenizer.vocab_size
+                )
+            )
+        srht_hidden = apply_block_srht(eval_hidden_np, checkpoint.srht)
+        mapped_targets = checkpoint.mapping[eval_targets.numpy()]
+        losses = []
+        for vec, cls in zip(srht_hidden, mapped_targets):
+            logits = checkpoint.model.predict_and_update(vec, int(cls), loss="logits_ce", train=False)
+            log_probs = log_softmax_np(logits)
+            losses.append(-log_probs[int(cls)])
+        ppl = float(math.exp(float(np.mean(losses))))
+        teacher_baseline = truncated_teacher_perplexity(
+            eval_logits,
+            eval_targets,
+            torch.tensor(checkpoint.shortlist, dtype=torch.long),
+            torch.tensor(checkpoint.mapping, dtype=torch.long),
+        )
+        log(
+            "Loaded test HTFR perplexity {:.3f} (teacher {:.3f}, shortlist size {})".format(
+                ppl, teacher_baseline, checkpoint.shortlist.size
+            )
+        )
+        results.append({"config": "test_model", "perplexity": ppl})
     for config in make_default_configs():
         log(
             "Training HTFR configuration '{name}' (top_k={top_k}, weight_mode={weight_mode}, eta={eta}, eta_g={eta_g})...".format(
@@ -465,6 +387,7 @@ def main() -> None:
                 "vocab_limit": args.vocab_limit,
                 "num_classes": num_classes,
                 "unk_index": unk_index,
+                "test_model": args.test_model,
             },
         }
         with open(args.output, "w", encoding="utf-8") as fh:
