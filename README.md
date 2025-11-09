@@ -33,6 +33,25 @@ To run the benchmark you must:
 Use ``--help`` for additional customization options such as dataset
 size, vocabulary truncation, and the evaluation output path.
 
+### Training the Gemma 3 test HTFR
+
+To distill a reusable HTFR checkpoint that the benchmark can load, run
+[`examples/train_test_htfr.py`](examples/train_test_htfr.py). The script
+follows the SRHT-based plan described in the accompanying documentation
+and defaults to the 2.7M active-scalar budget (SRHT dim 4096, 650
+HyperTensors, 16-way gating). Example:
+
+```bash
+python examples/train_test_htfr.py \
+    --hf-token <HF_TOKEN> \
+    --output test_htfr_checkpoint.npz
+```
+
+The resulting `.npz` file contains the SRHT projection parameters, the
+trained HyperTensors, and the truncated vocabulary mapping. Pass the
+checkpoint path to the benchmark via `--test-model` to include it in the
+perplexity summary.
+
 ---
 
 ## 1. HyperTensor Primitive
