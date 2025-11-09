@@ -1,4 +1,4 @@
-"""HyperTensor Field Regression package."""
+"""Hypertensor Field Regressor package."""
 
 from .tensor import HyperTensor
 from .model import HTFRModel, locality_weights
