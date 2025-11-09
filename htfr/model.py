@@ -1,4 +1,4 @@
-"""HTFR model and training utilities."""
+"""Hypertensor Field Regressor model and training utilities."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -50,7 +50,7 @@ def locality_weights(
 
 @dataclass
 class HTFRModel:
-    """HyperTensor Field Regression model."""
+    """Hypertensor Field Regressor model."""
 
     tensors: List[HyperTensor] = field(default_factory=list)
     top_k: int = 4

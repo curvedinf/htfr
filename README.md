@@ -1,8 +1,37 @@
-# HyperTensor Field Regression (HTFR)
+# Hypertensor Field Regressor (HTFR)
 
 ## Abstract
 
-HTFR is a fast, differentiable regression framework for very high-dimensional inputs. Its primitive, the HyperTensor, couples a geometric component (an oriented hyperplane) with a functional component (a local interpolation operator) to form a smooth, piecewise-linear field. A prediction is a locality-weighted blend of a small set of HyperTensors. HTFR supports online, error-driven learning (backprop-style), KNN-style locality, and scales to hundreds of thousands of input dimensions with structured projections. It targets tasks where large neural networks are accurate but too slow or heavy, such as token-wise next-logit regression from LLM internal features.
+The Hypertensor Field Regressor (HTFR) is a fast, differentiable regression framework for very high-dimensional inputs. Its primitive, the HyperTensor, couples a geometric component (an oriented hyperplane) with a functional component (a local interpolation operator) to form a smooth, piecewise-linear field. A prediction is a locality-weighted blend of a small set of HyperTensors. HTFR supports online, error-driven learning (backprop-style), KNN-style locality, and scales to hundreds of thousands of input dimensions with structured projections. It targets tasks where large neural networks are accurate but too slow or heavy, such as token-wise next-logit regression from LLM internal features.
+
+---
+
+## Gemma 3 Benchmark
+
+The repository now includes a reproducible benchmark that compares HTFR
+against the gated `google/gemma-3-270m` reference model. The script lives
+under [`examples/gemma3_benchmark.py`](examples/gemma3_benchmark.py) and
+produces truncated-vocabulary perplexity numbers for several HTFR
+configurations while using Gemma as the teacher.
+
+To run the benchmark you must:
+
+1. Accept the Gemma 3 license on Hugging Face and obtain an access token.
+2. Install the optional ``benchmark`` dependency set:
+
+   ```bash
+   pip install .[benchmark]
+   ```
+
+3. Execute the benchmark, providing the Hugging Face token either via the
+   ``--hf-token`` flag or the ``HF_TOKEN`` environment variable:
+
+   ```bash
+   python examples/gemma3_benchmark.py --hf-token <HF_TOKEN>
+   ```
+
+Use ``--help`` for additional customization options such as dataset
+size, vocabulary truncation, and the evaluation output path.
 
 ---
 
