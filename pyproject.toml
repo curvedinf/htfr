@@ -5,10 +5,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "htfr"
 version = "0.1.0"
-description = "HyperTensor Field Regression"
+description = "Hypertensor Field Regressor"
 authors = [{name = "HTFR Contributors"}]
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.23"]
+
+[project.optional-dependencies]
+benchmark = [
+    "datasets>=2.19",
+    "transformers>=4.41",
+    "torch>=2.3",
+    "huggingface_hub>=0.23",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
