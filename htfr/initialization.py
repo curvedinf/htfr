@@ -1,4 +1,4 @@
-"""Initialization helpers for HTFR."""
+"""Initialization helpers for the Hypertensor Field Regressor (HTFR)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -21,7 +21,7 @@ def kmeans(
     iters: int = 20,
     rng: np.random.Generator | None = None,
 ) -> ClusterResult:
-    """Simple k-means clustering used for HTFR initialization."""
+    """Simple k-means clustering used for Hypertensor Field Regressor initialization."""
 
     if rng is None:
         rng = np.random.default_rng()
