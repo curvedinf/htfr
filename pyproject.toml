@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=62", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "htfr"
+version = "0.1.0"
+description = "HyperTensor Field Regression"
+authors = [{name = "HTFR Contributors"}]
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.23"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["htfr"]
