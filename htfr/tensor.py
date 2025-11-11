@@ -6,6 +6,18 @@ from typing import Iterable, Tuple
 
 import numpy as np
 
+from .interpolation import InterpolationResult, available_interpolations, get_interpolation_module
+
+
+@dataclass
+class LocalResult:
+    """Container returned by :meth:`HyperTensor.local`."""
+
+    value: np.ndarray
+    distance: float
+    weights: np.ndarray
+    clipped_distance: float
+    distance_derivative: np.ndarray
 
 @dataclass
 class HyperTensor:
@@ -34,6 +46,8 @@ class HyperTensor:
     dpos: float
     C: np.ndarray
     tau: float = 1.0
+    interpolation: str = "lerp"
+    reference_radius: float = 5.0
     dtype: np.dtype = field(default=np.float32, repr=False)
 
     def __post_init__(self) -> None:
@@ -53,6 +67,11 @@ class HyperTensor:
         self.tau = float(self.tau)
         if self.tau <= 0.0:
             raise ValueError("tau must be positive")
+        if self.interpolation not in available_interpolations():
+            raise ValueError(f"Unknown interpolation module '{self.interpolation}'")
+        self.reference_radius = float(self.reference_radius)
+        if self.reference_radius <= 0.0:
+            raise ValueError("reference_radius must be positive")
 
     @property
     def output_dim(self) -> int:
@@ -64,54 +83,63 @@ class HyperTensor:
         x = np.asarray(x, dtype=self.dtype)
         return float(self.n @ x + self.delta)
 
-    def _alpha(self, d: float) -> Tuple[np.ndarray, float]:
-        """Return barycentric weights for a given signed distance.
-
-        The returned distance is clipped to the interpolation band, mirroring the
-        formulation in the whitepaper.
-        """
-
-        dcl = float(np.clip(d, self.dneg, self.dpos))
-        if dcl >= 0.0:
-            a_pos = dcl / (self.dpos + 1e-12)
-            alpha = np.array([0.0, 1.0 - a_pos, a_pos], dtype=self.dtype)
-        else:
-            a_neg = -dcl / (self.dneg - 1e-12)
-            alpha = np.array([a_neg, 1.0 - a_neg, 0.0], dtype=self.dtype)
-        return alpha, dcl
-
-    def local(self, x: np.ndarray) -> Tuple[np.ndarray, float, np.ndarray, float]:
-        """Evaluate the local interpolant at ``x``.
-
-        Returns
-        -------
-        L : ndarray
-            Local interpolated value.
-        d : float
-            Signed distance of ``x``.
-        alpha : ndarray
-            Barycentric coefficients used for interpolation.
-        d_clipped : float
-            Distance clipped to the interpolation band.
-        """
+    def local(self, x: np.ndarray) -> LocalResult:
+        """Evaluate the local interpolant at ``x`` using the configured module."""
 
         x = np.asarray(x, dtype=self.dtype)
         d = self.distance(x)
-        alpha, dcl = self._alpha(d)
-        L = self.C @ alpha
-        return L, d, alpha, dcl
+        module = get_interpolation_module(self.interpolation)
+        result: InterpolationResult = module.evaluate(
+            self.C, d, self.dneg, self.dpos, self.reference_radius
+        )
+        return LocalResult(
+            value=result.value.astype(self.dtype, copy=False),
+            distance=d,
+            weights=result.weights.astype(self.dtype, copy=False),
+            clipped_distance=result.clipped_distance,
+            distance_derivative=result.distance_derivative.astype(self.dtype, copy=False),
+        )
 
-    def to_tuple(self) -> Tuple[np.ndarray, float, float, float, np.ndarray, float]:
+    def to_tuple(
+        self,
+    ) -> Tuple[np.ndarray, float, float, float, np.ndarray, float, str, float]:
         """Return a serializable tuple of HyperTensor parameters."""
 
-        return self.n.copy(), self.delta, self.dneg, self.dpos, self.C.copy(), self.tau
+        return (
+            self.n.copy(),
+            self.delta,
+            self.dneg,
+            self.dpos,
+            self.C.copy(),
+            self.tau,
+            self.interpolation,
+            self.reference_radius,
+        )
 
     @classmethod
     def from_tuple(
         cls, params: Iterable[np.ndarray | float], dtype: np.dtype = np.float32
     ) -> "HyperTensor":
-        n, delta, dneg, dpos, C, tau = params
-        return cls(np.array(n, dtype=dtype), delta, dneg, dpos, np.array(C, dtype=dtype), tau)
+        items = list(params)
+        if len(items) == 6:
+            n, delta, dneg, dpos, C, tau = items
+            interpolation = "lerp"
+            reference_radius = 5.0
+        elif len(items) >= 8:
+            n, delta, dneg, dpos, C, tau, interpolation, reference_radius = items[:8]
+        else:
+            raise ValueError("Invalid HyperTensor tuple")
+        return cls(
+            np.array(n, dtype=dtype),
+            delta,
+            dneg,
+            dpos,
+            np.array(C, dtype=dtype),
+            tau,
+            interpolation=str(interpolation),
+            reference_radius=float(reference_radius),
+            dtype=dtype,
+        )
 
     def clone(self) -> "HyperTensor":
         """Deep copy the HyperTensor."""

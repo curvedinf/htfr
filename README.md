@@ -165,6 +165,16 @@ Large-\(D\) compatibility. Use a fast structured projection \(P\) (SRHT/CountSke
 
 ```python
 import numpy as np
+from dataclasses import dataclass
+
+
+@dataclass
+class LocalResult:
+    value: np.ndarray
+    distance: float
+    weights: np.ndarray
+    clipped_distance: float
+    distance_derivative: np.ndarray
 
 class HyperTensor:
     def __init__(self, n, delta, dneg, dpos, C, tau=1.0):
@@ -187,43 +197,40 @@ class HyperTensor:
         d = float(self.n @ x + self.delta)
         a, dcl = self._alpha(d)
         L = self.C @ a
-        return L, d, a, dcl
+        if 0.0 < d < self.dpos:
+            dLd = (self.C[:, 2] - self.C[:, 1]) / (self.dpos + 1e-12)
+        elif self.dneg < d < 0.0:
+            dLd = (self.C[:, 1] - self.C[:, 0]) / (-self.dneg + 1e-12)
+        else:
+            dLd = np.zeros_like(L)
+        return LocalResult(value=L, distance=d, weights=a, clipped_distance=dcl, distance_derivative=dLd)
 
 def predict_and_update(x, y, tensors, K=4, eta=0.05, eta_g=0.005, train=True):
     # distances and local outputs
     loc = []
     for i, T in enumerate(tensors):
-        L, d, a, dcl = T.local(x)
-        loc.append((i, abs(d), d, a, L))
+        res = T.local(x)
+        loc.append((i, abs(res.distance), res))
     # select top-K by |d|
     idx = np.argpartition([t[1] for t in loc], K)[:K]
     active = [loc[i] for i in idx]
     # weights (softmax over -|d|/tau_i)
-    ws = np.array([np.exp(-abs(d)/tensors[i].tau) for i,_,d,_,_ in active], dtype=np.float32)
+    ws = np.array([np.exp(-abs(res.distance)/tensors[i].tau) for i,_,res in active], dtype=np.float32)
     ws /= ws.sum() + 1e-12
     # blend
-    yhat = sum(w * L for w, (_,_,_,_,L) in zip(ws, active))
+    yhat = sum(w * res.value for w, (_,_,res) in zip(ws, active))
     if not train:
         return yhat
     # gradient at output (MSE)
     g = (yhat - y)  # dL/dyhat
     # updates
-    for w, (i, _, d, a, L) in zip(ws, active):
+    for w, (i, _, res) in zip(ws, active):
         Ti = tensors[i]
-        # controls
-        Ti.C -= eta * w * np.outer(g, a)
-        # geometry (inside bands only)
-        if 0.0 < d < Ti.dpos:
-            dLd = (Ti.C[:,2] - Ti.C[:,1]) / (Ti.dpos + 1e-12)
-        elif Ti.dneg < d < 0.0:
-            dLd = (Ti.C[:,0] - Ti.C[:,1]) / (Ti.dneg - 1e-12)
-        else:
-            dLd = 0.0
-        if isinstance(dLd, np.ndarray):
-            coeff = float(g @ dLd)
-            Ti.n -= eta_g * w * coeff * x
-            Ti.n /= (np.linalg.norm(Ti.n) + 1e-8)
-            Ti.delta -= eta_g * w * coeff
+        Ti.C -= eta * w * np.outer(g, res.weights)
+        coeff = float(g @ res.distance_derivative)
+        Ti.n -= eta_g * w * coeff * x
+        Ti.n /= (np.linalg.norm(Ti.n) + 1e-8)
+        Ti.delta -= eta_g * w * coeff
     return yhat
 ```
 
