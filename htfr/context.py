@@ -39,7 +39,7 @@ class ContextBuilderConfig:
 
     window_size: int
     hidden_dim: int
-    hashed_dim: int = 8192
+    hashed_dim: int = 16384
     ngram: int = 2
     num_hashes: int = 2
     tail_tokens: int = 16

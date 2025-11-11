@@ -75,7 +75,7 @@ class HTFRModel:
     epsilon: float = 1e-6
     eta: float = 0.05
     eta_g: float = 0.005
-    max_knn_radius: float = 1.0
+    max_knn_radius: float = 10.0
     locality_radius: float | None = None
     interpolation_reference: float | None = None
     interpolation_weights: Dict[str, float] = field(default_factory=dict)
@@ -88,7 +88,7 @@ class HTFRModel:
     usage_decay: float = 0.995
     faiss_probe_multiplier: int = 4
     distance_mode: Literal["planar", "euclidean", "hybrid", "hybrid_exp"] = "hybrid_exp"
-    distance_exp_lambda: float = 1.0
+    distance_exp_lambda: float = 5.0
     distance_clip: float = 1e6
 
     def __post_init__(self) -> None:
@@ -455,14 +455,33 @@ class HTFRModel:
             return self.distance_clip
         return float(min(max(value, 1e-12), self.distance_clip))
 
-    def prune_unmodified(self) -> int:
-        """Remove Hypertensors that were never updated during training."""
+    def prune_unmodified(self) -> tuple[int, int]:
+        """Attempt to relocate and then prune Hypertensors that never received updates.
+
+        Returns
+        -------
+        (pruned, revived):
+            Number of tensors removed vs. successfully revived.
+        """
 
         if not self.tensors:
-            return 0
+            return 0, 0
+        zero_indices = np.nonzero(self._update_counts == 0)[0]
+        revived = 0
+        if zero_indices.size:
+            for idx in zero_indices:
+                sample = self._sample_for_reseed()
+                if sample is None:
+                    break
+                reseed_tensor_around_sample(self.tensors[int(idx)], sample, rng=self.rng)
+                self._update_counts[int(idx)] = 1
+                self._usage_counts[int(idx)] = 0.0
+                self._avg_distance[int(idx)] = 0.0
+                self._loss_trace[int(idx)] = 0.0
+                revived += 1
         keep = np.nonzero(self._update_counts > 0)[0]
-        if keep.size == 0 or keep.size == len(self.tensors):
-            return 0
+        if keep.size == len(self.tensors):
+            return 0, revived
         removed = len(self.tensors) - keep.size
         self.tensors = [self.tensors[int(idx)] for idx in keep]
         self._usage_counts = self._usage_counts[keep]
@@ -470,7 +489,16 @@ class HTFRModel:
         self._loss_trace = self._loss_trace[keep]
         self._update_counts = self._update_counts[keep]
         self._mark_faiss_dirty()
-        return removed
+        return removed, revived
+
+    def _sample_for_reseed(self) -> np.ndarray | None:
+        if self._error_queue:
+            sample = self._error_queue[self.rng.integers(len(self._error_queue))][0]
+            return np.asarray(sample, dtype=np.float32)
+        if not self.tensors:
+            return None
+        dim = self.tensors[0].n.shape[0]
+        return self.rng.standard_normal(dim).astype(np.float32)
 
     @staticmethod
     def _geometric_distance(planar: float, euclidean: float, eps: float = 1e-12) -> float:

@@ -85,18 +85,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vocab-limit", type=int, default=4096, help="Compact vocabulary size")
     parser.add_argument("--stage1-tensors", type=int, default=8000, help="Number of Stage-1 Hypertensors")
     parser.add_argument("--stage2-tensors", type=int, default=16000, help="Number of Stage-2 Hypertensors")
-    parser.add_argument("--stage1-countsketch-dim", type=int, default=32768, help="Stage-1 CountSketch dim")
-    parser.add_argument("--stage1-srht-dim", type=int, default=16_384, help="Stage-1 SRHT dim")
+    parser.add_argument("--stage1-countsketch-dim", type=int, default=65536, help="Stage-1 CountSketch dim")
+    parser.add_argument("--stage1-srht-dim", type=int, default=32_768, help="Stage-1 SRHT dim")
     parser.add_argument("--stage2-countsketch-dim", type=int, default=8192, help="Stage-2 CountSketch dim")
-    parser.add_argument("--stage2-srht-dim", type=int, default=4096, help="Stage-2 SRHT dim")
+    parser.add_argument("--stage2-srht-dim", type=int, default=8192, help="Stage-2 SRHT dim")
     parser.add_argument("--stage1-target-dim", type=int, default=1024, help="Stage-1 embedding size")
     parser.add_argument("--tail-tokens", type=int, default=16, help="Tokens copied into Stage-2 tail")
-    parser.add_argument("--hashed-dim", type=int, default=8192, help="Dimension of hashed indicators")
+    parser.add_argument("--hashed-dim", type=int, default=16384, help="Dimension of hashed indicators")
     parser.add_argument("--stage1-eta", type=float, default=0.04, help="Stage-1 learning rate")
     parser.add_argument("--stage1-eta-g", type=float, default=0.004, help="Stage-1 geometry LR")
     parser.add_argument("--stage2-eta", type=float, default=0.03, help="Stage-2 learning rate")
     parser.add_argument("--stage2-eta-g", type=float, default=0.003, help="Stage-2 geometry LR")
-    parser.add_argument("--stage1-tau", type=float, default=1.0, help="Stage-1 tau")
+    parser.add_argument("--stage1-tau", type=float, default=2.0, help="Stage-1 tau")
     parser.add_argument("--stage2-tau", type=float, default=0.8, help="Stage-2 tau")
     parser.add_argument("--metrics-path", type=str, default=None, help="Optional JSONL metrics output")
     parser.add_argument("--output", type=str, default=None, help="Optional checkpoint path (.npz)")
@@ -219,6 +219,9 @@ def main() -> None:
         eta=args.stage1_eta,
         eta_g=args.stage1_eta_g,
         rng=rng,
+        raw_dim=None,
+        top_k=64,
+        train_top_k=256,
     )
     stage2_state = _build_stage_state(
         builder=None,
@@ -231,6 +234,8 @@ def main() -> None:
         eta_g=args.stage2_eta_g,
         rng=rng,
         raw_dim=builder.stage1_target_dim + builder.tail_raw_dim,
+        top_k=32,
+        train_top_k=128,
     )
     logger.info(
         "Stage1 config | tensors=%d target_dim=%d countsketch_dim=%d srht_dim=%d",
@@ -410,6 +415,9 @@ def _build_stage_state(
     eta_g: float,
     rng: np.random.Generator,
     raw_dim: Optional[int] = None,
+    *,
+    top_k: int,
+    train_top_k: int,
 ) -> _StageBuildResult:
     if raw_dim is None:
         if builder is None:
@@ -432,8 +440,8 @@ def _build_stage_state(
     )
     model = HTFRModel(
         tensors=tensors,
-        top_k=32,
-        train_top_k=128,
+        top_k=top_k,
+        train_top_k=train_top_k,
         eta=eta,
         eta_g=eta_g,
         weight_mode="softmax",

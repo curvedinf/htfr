@@ -244,8 +244,9 @@ def test_prune_unmodified_removes_inactive_tensors() -> None:
     x = np.array([0.0], dtype=np.float32)
     target = np.array([0.25], dtype=np.float32)
     model.predict_and_update(x, target, loss="mse", train=True)
-    removed = model.prune_unmodified()
-    assert removed == 1
+    removed, revived = model.prune_unmodified()
+    assert removed == 0
+    assert revived >= 1
     assert len(model.tensors) == 1
     assert model._update_counts.shape[0] == 1
 
@@ -258,6 +259,7 @@ def test_prune_unmodified_skips_when_no_updates() -> None:
         train_top_k=2,
         randomize_interpolations=False,
     )
-    removed = model.prune_unmodified()
+    removed, revived = model.prune_unmodified()
     assert removed == 0
+    assert revived == 0
     assert len(model.tensors) == 2
