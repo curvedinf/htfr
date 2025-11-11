@@ -1,14 +1,10 @@
-import os
-import tempfile
 import unittest
 
 import numpy as np
 
 from htfr.interpolation import available_interpolations, get_interpolation_module
 from htfr.model import HTFRModel
-from htfr.serialization import load_htfr_checkpoint, save_htfr_checkpoint
 from htfr.tensor import HyperTensor
-from htfr.feature_ops import SRHTParameters
 
 
 def _make_tensor(interpolation: str = "lerp") -> HyperTensor:
@@ -51,47 +47,6 @@ class InterpolationModuleTests(unittest.TestCase):
     def test_get_interpolation_module_invalid(self) -> None:
         with self.assertRaises(ValueError):
             get_interpolation_module("does-not-exist")
-
-    def test_checkpoint_roundtrip_preserves_interpolation_config(self) -> None:
-        tensor = _make_tensor()
-        model = HTFRModel(
-            tensors=[tensor],
-            max_knn_radius=0.75,
-            interpolation_reference=3.0,
-            interpolation_weights={"lerp": 2.0, "hermite": 0.0},
-            randomize_interpolations=False,
-        )
-        srht = SRHTParameters(
-            signs=np.ones(2, dtype=np.float32),
-            permutation=np.arange(2, dtype=np.int64),
-            input_dim=2,
-            padded_dim=2,
-            target_dim=2,
-            block_size=2,
-            block_eps=1e-6,
-            scale=1.0,
-        )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = os.path.join(tmpdir, "ckpt.npz")
-            save_htfr_checkpoint(
-                path,
-                model,
-                srht,
-                mapping=np.arange(2, dtype=np.int64),
-                shortlist=np.arange(1, dtype=np.int64),
-                unk_index=0,
-                metadata={"tag": "unit-test"},
-            )
-            checkpoint = load_htfr_checkpoint(path)
-        loaded_model = checkpoint.model
-        self.assertAlmostEqual(loaded_model.interpolation_reference, 3.0)
-        self.assertEqual(loaded_model.max_knn_radius, 0.75)
-        self.assertFalse(loaded_model.randomize_interpolations)
-        self.assertEqual(loaded_model.locality_radius, 3.0)
-        self.assertIn("lerp", loaded_model.interpolation_weights)
-        self.assertEqual(loaded_model.interpolation_weights["hermite"], 0.0)
-        self.assertAlmostEqual(loaded_model.tensors[0].reference_radius, 3.0)
-
 
 if __name__ == "__main__":
     unittest.main()

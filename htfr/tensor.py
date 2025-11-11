@@ -48,15 +48,18 @@ class HyperTensor:
     tau: float = 1.0
     interpolation: str = "lerp"
     reference_radius: float = 5.0
-    dtype: np.dtype = field(default=np.float32, repr=False)
+    dtype: np.dtype = field(default=np.float16, repr=False)
 
     def __post_init__(self) -> None:
-        self.n = np.asarray(self.n, dtype=self.dtype)
-        norm = np.linalg.norm(self.n)
+        # Work in float32 for numerical stability, then cast back to storage dtype.
+        normal = np.asarray(self.n, dtype=np.float32)
+        norm = np.linalg.norm(normal)
         if norm == 0.0:
             raise ValueError("Normal vector must be non-zero")
-        self.n = self.n / norm
-        self.delta = float(self.delta)
+        normal = normal / norm
+        self.n = normal.astype(self.dtype)
+        dtype_type = np.dtype(self.dtype).type
+        self.delta = dtype_type(float(self.delta))
         self.dneg = float(self.dneg)
         self.dpos = float(self.dpos)
         if not (self.dneg < 0.0 < self.dpos):
@@ -80,17 +83,19 @@ class HyperTensor:
     def distance(self, x: np.ndarray) -> float:
         """Return the signed distance of ``x`` from the hyperplane."""
 
-        x = np.asarray(x, dtype=self.dtype)
-        return float(self.n @ x + self.delta)
+        x32 = np.asarray(x, dtype=np.float32)
+        n32 = np.asarray(self.n, dtype=np.float32)
+        return float(n32 @ x32 + float(self.delta))
 
     def local(self, x: np.ndarray) -> LocalResult:
         """Evaluate the local interpolant at ``x`` using the configured module."""
 
-        x = np.asarray(x, dtype=self.dtype)
-        d = self.distance(x)
+        x32 = np.asarray(x, dtype=np.float32)
+        d = self.distance(x32)
         module = get_interpolation_module(self.interpolation)
+        controls = np.asarray(self.C, dtype=np.float32)
         result: InterpolationResult = module.evaluate(
-            self.C, d, self.dneg, self.dpos, self.reference_radius
+            controls, d, self.dneg, self.dpos, self.reference_radius
         )
         return LocalResult(
             value=result.value.astype(self.dtype, copy=False),
@@ -149,8 +154,7 @@ class HyperTensor:
     def renormalize(self) -> None:
         """Ensure that the normal vector remains unit length."""
 
-        norm = np.linalg.norm(self.n)
+        norm = np.linalg.norm(self.n.astype(np.float32))
         if norm == 0.0:
             raise ValueError("Normal became zero during updates")
-        self.n = self.n / norm
-
+        self.n = (self.n.astype(np.float32) / norm).astype(self.dtype)

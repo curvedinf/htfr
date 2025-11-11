@@ -101,3 +101,80 @@ def initialize_hypertensors(
         )
     return tensors
 
+
+def random_hypertensor(
+    input_dim: int,
+    output_dim: int,
+    tau: float = 1.0,
+    reference_radius: float = 5.0,
+    rng: np.random.Generator | None = None,
+    dtype: np.dtype = np.float16,
+) -> HyperTensor:
+    """Return a randomly initialized HyperTensor."""
+
+    if rng is None:
+        rng = np.random.default_rng()
+    normal = rng.normal(size=input_dim).astype(np.float32)
+    norm = np.linalg.norm(normal) + 1e-12
+    normal /= norm
+    offset = float(rng.normal(scale=0.5))
+    span = float(rng.uniform(0.1, 1.0))
+    controls = rng.normal(scale=0.05, size=(output_dim, 3)).astype(np.float32)
+    return HyperTensor(
+        normal.astype(dtype),
+        offset,
+        -span,
+        span,
+        controls.astype(dtype),
+        tau=tau,
+        reference_radius=reference_radius,
+        dtype=dtype,
+    )
+
+
+def random_hypertensors(
+    count: int,
+    input_dim: int,
+    output_dim: int,
+    tau: float = 1.0,
+    reference_radius: float = 5.0,
+    rng: np.random.Generator | None = None,
+    dtype: np.dtype = np.float16,
+) -> List[HyperTensor]:
+    """Return ``count`` randomly initialized HyperTensors."""
+
+    tensors: List[HyperTensor] = []
+    for _ in range(max(0, count)):
+        tensors.append(
+            random_hypertensor(
+                input_dim,
+                output_dim,
+                tau=tau,
+                reference_radius=reference_radius,
+                rng=rng,
+                dtype=dtype,
+            )
+        )
+    return tensors
+
+
+def reseed_tensor_around_sample(
+    tensor: HyperTensor,
+    sample: np.ndarray,
+    rng: np.random.Generator | None = None,
+    jitter: float = 1e-3,
+) -> None:
+    """Reseed ``tensor`` so that ``sample`` lies near its hyperplane."""
+
+    if rng is None:
+        rng = np.random.default_rng()
+    sample = np.asarray(sample, dtype=np.float32)
+    normal = rng.normal(size=sample.shape[0]).astype(np.float32)
+    normal /= np.linalg.norm(normal) + 1e-12
+    tensor.n = normal.astype(tensor.dtype)
+    tensor.delta = np.dtype(tensor.dtype).type(-float(normal @ sample))
+    span = float(rng.uniform(0.05, 0.5))
+    tensor.dneg = -span
+    tensor.dpos = span
+    perturb = rng.normal(scale=jitter, size=tensor.C.shape).astype(np.float32)
+    tensor.C = perturb.astype(tensor.dtype)

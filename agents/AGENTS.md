@@ -16,18 +16,6 @@ guidelines.
 - `test_project.sh` — ensures the virtual environment exists, activates
   it, runs `python -m compileall` over the `htfr` and `examples`
   packages, and finally executes `pytest` with coverage reporting.
-- `smoke_cli.sh` — activates the shared environment and runs the
-  `--help` commands for both Gemma entry points to confirm CLI parsing.
-- `train_htfr.sh` — wraps `examples/train_test_htfr.py`, guaranteeing the
-  virtual environment is active before launching the distillation job.
-  When invoked with no arguments it automatically writes the checkpoint
-  to `checkpoints/test_htfr_checkpoint.npz` and emits minute-level
-  progress pings while training is running.
-- `benchmark_htfr.sh` — wraps `examples/gemma3_benchmark.py`, ensuring
-  the same environment runs the benchmark (pass `--test-model` to
-  include your freshly trained checkpoint). With no arguments it emits a
-  JSON summary under `benchmarks/benchmark_results.json` and, when the
-  default checkpoint exists, benchmarks it automatically.
 
 Each script enables `set -euo pipefail` so unexpected failures stop the
 automation early. Python invocations run with `PYTHONUNBUFFERED=1` so

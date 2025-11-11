@@ -6,133 +6,53 @@ The Hypertensor Field Regressor (HTFR) is a fast, differentiable regression fram
 
 ---
 
-## Gemma 3 Benchmark
+## HyperField Transformer Pipeline
 
-The repository now includes a reproducible benchmark that compares HTFR
-against the gated `google/gemma-3-270m` reference model. The script lives
-under [`examples/gemma3_benchmark.py`](examples/gemma3_benchmark.py) and
-produces truncated-vocabulary perplexity numbers for several HTFR
-configurations while using Gemma as the teacher.
+The repository now focuses on the two-stage HyperField Transformer
+(HFT) described in `notes/htfr_llm_adaptation.md`. The new workflow
+replaces the legacy single-stage scripts and provides a reusable trainer
+plus a simple benchmarking harness.
 
-To run the benchmark you must:
+### Train the HFT against Gemma 3 270M
 
-1. Accept the Gemma 3 license on Hugging Face and obtain an access token.
-2. Install the optional ``benchmark`` dependency set:
+```
+python examples/train_hft.py \
+    --hf-token "$HF_TOKEN" \
+    --model google/gemma-3-270m \
+    --train-tokens 200000 \
+    --eval-tokens 50000 \
+    --seq-len 128 \
+    --stride 64 \
+    --output checkpoints/hft_gemma270m.npz \
+    --metrics-path logs/train_metrics.jsonl
+```
 
-   ```bash
-   pip install .[benchmark]
-   ```
+Key features:
 
-3. Execute the benchmark, providing the Hugging Face token either via the
-   ``--hf-token`` flag or the ``HF_TOKEN`` environment variable:
+- **Full-context capture.** The `GemmaAdapter` streams sliding windows
+  from WikiText (or your dataset of choice) while emitting the hidden
+  states, logits, and next-token targets required by the HFT pipeline.
+- **Context builder.** `htfr.context.ContextBuilder` concatenates the
+  hidden states, hashed n-gram indicators, and synthetic ROPE phases
+  before projecting them through CountSketch + SRHT stacks to reach the
+  16k → 1k → 4k layout described in the notes.
+- **Two-stage training.** Stage 1 regresses a 1k context embedding
+  (supervised by a projected teacher hidden state) while Stage 2 predicts
+  truncated next-token logits from that embedding plus the uncompressed
+  16-token tail. Both stages default to `top_k=32` active HyperTensors to
+  match the Gemma-3-270M capacity budget.
+- **Checkpointing.** `htfr.checkpoint.save_hft_checkpoint` persists both
+  stages, their projection stacks, and the compact vocabulary mapping so
+  training can resume or the model can be shared.
+- **Metrics.** The trainer logs student and teacher perplexity into the
+  optional JSONL file so you can track convergence without rerunning the
+  teacher. Use `examples/benchmark_hft.py logs/train_metrics.jsonl` to
+  summarize the trend once training finishes.
 
-   ```bash
-   python examples/gemma3_benchmark.py --hf-token <HF_TOKEN>
-   ```
-
-Use ``--help`` for additional customization options such as dataset
-size, vocabulary truncation, and the evaluation output path.
-
-### Training the Gemma 3 test HTFR
-
-[`examples/train_test_htfr.py`](examples/train_test_htfr.py) distills a
-reusable HTFR checkpoint from Gemma 3 teacher activations. The default
-configuration is now tuned for higher accuracy: 2M teacher tokens, SRHT
-dim 8192 (block size 128), 1.2k HyperTensors, and 24-way gating with two
-epochs of shuffled online updates. Follow the steps below to create a
-test model locally:
-
-1. **Accept the Gemma 3 license & grab a token.** Visit
-   <https://huggingface.co/google/gemma-3-270m>, accept the license, and
-   either run `huggingface-cli login` or export the token before
-   training:
-
-   ```bash
-   export HF_TOKEN=hf_xxx   # or pass --hf-token on the CLI
-   ```
-
-   You can also drop the credential and GPU/runtime toggles into a local
-   `.env` file (for example, `HF_TOKEN=hf_xxx`,
-   `ROCM_VISIBLE_DEVICES=0`). Both the Python entry points (via
-   `python-dotenv`) and the shell helpers in `agents/` source this file
-   so the environment applies uniformly.
-
-2. **Create an environment with the benchmark extras.** Any Python 3.10+
-   environment works; install HTFR in editable mode so both the CLI
-   script and the package share the same code:
-
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install --upgrade pip
-   pip install -e .[benchmark]
-   ```
-
-   If you're running on an AMD GPU stack and already provisioned the
-   ROCm-focused dependencies from
-   `../gemma-3-270m-data-extraction-finetuner`, you can mirror that setup
-   here via the new `rocm` extra. The helper script below installs the
-   editable package with `benchmark`, `dev`, and `rocm` extras and, when
-   requested, pulls ROCm PyTorch wheels from AMD's nightly index:
-
-   ```bash
-   # Optional: tell the helper to install ROCm torch/vision/audio.
-   export HTFR_INSTALL_ROCM_TORCH=1
-   # Optional: override the AMD index if you track a different ROCm cut.
-   # export HTFR_ROCM_INDEX_URL="https://download.pytorch.org/whl/rocm6.1"
-   ./agents/setup_env.sh
-   ```
-
-   Behind the scenes the `rocm` extra brings in the same high-level stack
-   as the finetuner project (`optimum[amd]`, `accelerate`, `trl`, `peft`,
-   `unsloth`, `litellm`, etc.), so you can reuse shared benchmarking,
-   training, and evaluation tools across both repositories. Use
-   `HTFR_SETUP_EXTRAS` if you need to customize which extras the helper
-   installs (for example, `HTFR_SETUP_EXTRAS=benchmark,dev`).
-
-3. **(Optional) Warm the Gemma weights.** The first run downloads the
-   model; doing a quick `python -c "from htfr.gemma import load_gemma_model; load_gemma_model('google/gemma-3-270m', '$HF_TOKEN')"`
-   can populate the local cache up front, which avoids a long download in
-   the training run.
-
-4. **Run the training script.** Provide an output path for the `.npz`
-   checkpoint and tweak the token counts if you need a faster smoke
-   test. The refreshed defaults target a ~5.0M parameter HTFR with
-   higher-fidelity features:
-
-   ```bash
-   python examples/train_test_htfr.py \
-       --hf-token "$HF_TOKEN" \
-       --output checkpoints/test_htfr_checkpoint.npz \
-       --train-tokens 2000000 \
-       --eval-tokens 200000 \
-       --seq-len 128 \
-       --stride 64 \
-       --srht-dim 8192 \
-       --srht-block 128 \
-       --init-tensors 1200 \
-       --top-k 24 \
-       --train-epochs 2
-   ```
-
-   For a laptop-friendly run, lower `--train-tokens`, `--srht-dim`, and
-   `--init-tensors`, and keep `--train-epochs 1` to maintain turnaround.
-   The script scales almost linearly with each of these knobs and
-   automatically uses CUDA when available.
-
-5. **Use the checkpoint in the benchmark.** Pass the saved path through
-   `--test-model` to compare it against Gemma inside
-   `examples/gemma3_benchmark.py`:
-
-   ```bash
-   python examples/gemma3_benchmark.py \
-       --hf-token "$HF_TOKEN" \
-       --test-model checkpoints/test_htfr_checkpoint.npz
-   ```
-
-The `.npz` archive stores the SRHT projection, trained HyperTensors, the
-truncated vocabulary mapping, and metadata (including the new training
-epochs) describing the teacher setup.
+The defaults allocate ~8k Stage‑1 tensors and ~16k Stage‑2 tensors
+(float16 parameters) which keeps memory usage comparable to Gemma
+3 × 270 M while providing enough locality to hit competitive perplexity
+once trained.
 
 ---
 

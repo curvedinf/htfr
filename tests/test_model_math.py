@@ -89,3 +89,26 @@ def test_model_interpolation_weights_must_sum_positive() -> None:
     model.interpolation_weights = {name: 0.0 for name in model.interpolation_weights}
     with pytest.raises(ValueError):
         model._interpolation_probabilities()
+
+
+def test_seed_random_tensors_appends_new_entries() -> None:
+    tensor = make_tensor()
+    model = HTFRModel.from_tensors([tensor], randomize_interpolations=False)
+    model.seed_random_tensors(count=2, input_dim=1, output_dim=tensor.output_dim)
+    assert len(model.tensors) == 3
+
+
+def test_high_error_queue_triggers_relocation() -> None:
+    tensor = make_tensor()
+    model = HTFRModel.from_tensors(
+        [tensor],
+        randomize_interpolations=False,
+        error_threshold=1e-4,
+        relocation_interval=1,
+        max_error_queue=4,
+    )
+    x = np.array([0.0], dtype=np.float32)
+    target = np.array([10.0], dtype=np.float32)
+    model.predict_and_update(x, target, loss="mse", train=True)
+    assert len(model._error_queue) == 0
+    assert model._usage_counts[0] >= 1.0

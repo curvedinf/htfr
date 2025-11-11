@@ -6,6 +6,9 @@ from htfr.initialization import (
     initialize_hypertensors,
     kmeans,
     principal_direction,
+    random_hypertensor,
+    random_hypertensors,
+    reseed_tensor_around_sample,
 )
 
 
@@ -44,7 +47,7 @@ def test_initialize_hypertensors_honors_reference_radius() -> None:
     assert len(tensors) == 3
     for tensor in tensors:
         assert np.isclose(tensor.reference_radius, 7.5)
-        np.testing.assert_allclose(np.linalg.norm(tensor.n), 1.0, atol=1e-5)
+        np.testing.assert_allclose(np.linalg.norm(tensor.n.astype(np.float32)), 1.0, atol=5e-4)
 
 
 def test_initialize_hypertensors_validates_lengths() -> None:
@@ -52,3 +55,20 @@ def test_initialize_hypertensors_validates_lengths() -> None:
     outputs = np.ones((5, 2), dtype=np.float32)
     with pytest.raises(ValueError):
         initialize_hypertensors(data, outputs, k=2)
+
+
+def test_random_hypertensor_shapes_match_expectations() -> None:
+    tensor = random_hypertensor(input_dim=4, output_dim=3, rng=np.random.default_rng(0))
+    assert tensor.n.shape == (4,)
+    assert tensor.C.shape == (3, 3)
+    assert tensor.C.dtype == np.float16
+
+
+def test_random_hypertensors_batch_and_reseed() -> None:
+    tensors = random_hypertensors(2, input_dim=2, output_dim=2, rng=np.random.default_rng(1))
+    assert len(tensors) == 2
+    sample = np.array([0.25, -0.5], dtype=np.float32)
+    before = tensors[0].distance(sample)
+    reseed_tensor_around_sample(tensors[0], sample, rng=np.random.default_rng(2))
+    after = tensors[0].distance(sample)
+    assert abs(before) > abs(after)

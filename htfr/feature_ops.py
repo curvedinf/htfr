@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Iterable, Sequence, Tuple
 
 import numpy as np
 
@@ -207,12 +207,182 @@ def block_rmsnorm(
     return output
 
 
+@dataclass(frozen=True)
+class CountSketchParameters:
+    """Parameters describing a CountSketch projection."""
+
+    bucket_indices: np.ndarray  # shape (input_dim,)
+    signs: np.ndarray  # shape (input_dim,)
+    input_dim: int
+    output_dim: int
+
+    def to_dict(self) -> dict[str, np.ndarray]:
+        return {
+            "cs_bucket_indices": self.bucket_indices,
+            "cs_signs": self.signs,
+            "cs_input_dim": np.array([self.input_dim], dtype=np.int32),
+            "cs_output_dim": np.array([self.output_dim], dtype=np.int32),
+        }
+
+    @classmethod
+    def from_arrays(cls, arrays: dict[str, np.ndarray]) -> "CountSketchParameters":
+        return cls(
+            bucket_indices=np.asarray(arrays["cs_bucket_indices"], dtype=np.int64),
+            signs=np.asarray(arrays["cs_signs"], dtype=np.float32),
+            input_dim=int(np.asarray(arrays["cs_input_dim"]).item()),
+            output_dim=int(np.asarray(arrays["cs_output_dim"]).item()),
+        )
+
+
+def make_count_sketch(
+    input_dim: int,
+    output_dim: int,
+    rng: np.random.Generator | None = None,
+) -> CountSketchParameters:
+    """Construct parameters for a CountSketch projection."""
+
+    if rng is None:
+        rng = np.random.default_rng()
+    bucket_indices = rng.integers(low=0, high=output_dim, size=input_dim, dtype=np.int64)
+    signs = rng.choice([-1.0, 1.0], size=input_dim).astype(np.float32)
+    return CountSketchParameters(bucket_indices=bucket_indices, signs=signs, input_dim=input_dim, output_dim=output_dim)
+
+
+def apply_count_sketch(data: np.ndarray, params: CountSketchParameters) -> np.ndarray:
+    """Apply CountSketch to ``data`` with shape (N, input_dim)."""
+
+    data = np.asarray(data, dtype=np.float32)
+    if data.ndim != 2 or data.shape[1] != params.input_dim:
+        raise ValueError(
+            f"Expected data with shape (N, {params.input_dim}), got {data.shape}"
+        )
+    scaled = data * params.signs
+    output = np.zeros((data.shape[0], params.output_dim), dtype=np.float32)
+    for idx in range(params.input_dim):
+        output[:, params.bucket_indices[idx]] += scaled[:, idx]
+    return output
+
+
+def _stable_hash(values: Sequence[int], seed: int) -> int:
+    acc = 0x9E3779B185EBCA87 ^ seed
+    for value in values:
+        acc ^= (value + 0x9E3779B1) & 0xFFFFFFFFFFFFFFFF
+        acc = (acc * 0xC2B2AE3D27D4EB4F + 0x165667B19E3779F9) & 0xFFFFFFFFFFFFFFFF
+    return acc
+
+
+def hashed_ngram_features(
+    tokens: Sequence[int],
+    dim: int,
+    ngram: int = 2,
+    num_hashes: int = 2,
+    seed: int = 0,
+) -> np.ndarray:
+    """Return hashed n-gram indicator features for ``tokens``."""
+
+    vec = np.zeros(dim, dtype=np.float32)
+    if ngram <= 0 or len(tokens) < ngram:
+        return vec
+    limit = len(tokens) - ngram + 1
+    for start in range(limit):
+        window = tokens[start : start + ngram]
+        for h in range(num_hashes):
+            bucket = _stable_hash(window, seed + h) % dim
+            vec[bucket] += 1.0
+    return vec
+
+
+class ProjectionStack:
+    """Implements CountSketch → SRHT → optional PCA projections."""
+
+    def __init__(
+        self,
+        raw_dim: int,
+        srht_params: Sequence[SRHTParameters],
+        countsketch: CountSketchParameters | None = None,
+        post_linear: np.ndarray | None = None,
+        output_dtype: np.dtype = np.float16,
+    ) -> None:
+        if not srht_params:
+            raise ValueError("ProjectionStack requires at least one SRHT parameter set")
+        self.raw_dim = int(raw_dim)
+        self.srht_params = tuple(srht_params)
+        self.countsketch = countsketch
+        self.post_linear = None if post_linear is None else np.asarray(post_linear, dtype=np.float32)
+        self.output_dtype = output_dtype
+        self.output_dim = int(sum(params.target_dim for params in self.srht_params))
+
+    def _prepare_input(self, vector: np.ndarray, extra: np.ndarray | None) -> np.ndarray:
+        vec = np.asarray(vector, dtype=np.float32)
+        if vec.ndim != 1 or vec.shape[0] != self.raw_dim:
+            raise ValueError(f"Expected raw feature dimension {self.raw_dim}, got {vec.shape}")
+        if extra is not None:
+            if self.countsketch is None:
+                raise ValueError("Extra features require a CountSketch stage")
+            extra_vec = np.asarray(extra, dtype=np.float32)
+            vec = np.concatenate([vec, extra_vec], axis=0)
+        return vec
+
+    def project(self, vector: np.ndarray, extra: np.ndarray | None = None) -> np.ndarray:
+        """Project a single feature vector through the configured stack."""
+
+        prepared = self._prepare_input(vector, extra)
+        if self.countsketch is not None and prepared.shape[0] != self.countsketch.input_dim:
+            raise ValueError(
+                f"CountSketch expects input dim {self.countsketch.input_dim}, got {prepared.shape[0]}"
+            )
+        stage = prepared[None, :]
+        if self.countsketch is not None:
+            stage = apply_count_sketch(stage, self.countsketch)
+        srht_views = [apply_block_srht(stage, params) for params in self.srht_params]
+        merged = np.concatenate(srht_views, axis=-1)
+        if self.post_linear is not None:
+            merged = merged @ self.post_linear
+        return merged[0].astype(self.output_dtype)
+
+    def project_batch(
+        self, vectors: np.ndarray, extras: np.ndarray | None = None
+    ) -> np.ndarray:
+        """Project a batch of feature vectors."""
+
+        batch = np.asarray(vectors, dtype=np.float32)
+        if batch.ndim != 2 or batch.shape[1] != self.raw_dim:
+            raise ValueError(
+                f"Expected batch with shape (N, {self.raw_dim}), got {batch.shape}"
+            )
+        if extras is not None:
+            extras_arr = np.asarray(extras, dtype=np.float32)
+            if extras_arr.ndim != 2 or extras_arr.shape[0] != batch.shape[0]:
+                raise ValueError(
+                    "Extras must be a 2-D array with matching batch size"
+                )
+            batch = np.concatenate([batch, extras_arr], axis=-1)
+        if self.countsketch is not None and batch.shape[1] != self.countsketch.input_dim:
+            raise ValueError(
+                f"CountSketch expects input dim {self.countsketch.input_dim}, got {batch.shape[1]}"
+            )
+        stage = batch
+        if self.countsketch is not None:
+            stage = apply_count_sketch(stage, self.countsketch)
+        srht_views = [apply_block_srht(stage, params) for params in self.srht_params]
+        merged = np.concatenate(srht_views, axis=-1)
+        if self.post_linear is not None:
+            merged = merged @ self.post_linear
+        return merged.astype(self.output_dtype)
+
+    def update_post_linear(self, matrix: np.ndarray) -> None:
+        """Install/replace the optional PCA/whitening linear transform."""
+
+        self.post_linear = np.asarray(matrix, dtype=np.float32)
+
+
 def srht_feature_tuple(
-    hidden: np.ndarray, params: SRHTParameters
+    hidden: np.ndarray, params: SRHTParameters, output_dtype: np.dtype = np.float16
 ) -> Tuple[np.ndarray, SRHTParameters]:
     """Convenience wrapper returning SRHT features and parameters."""
 
-    return apply_block_srht(hidden, params), params
+    projected = apply_block_srht(hidden, params)
+    return projected.astype(output_dtype), params
 
 
 if njit is not None:
