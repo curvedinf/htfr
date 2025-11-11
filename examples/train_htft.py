@@ -1,4 +1,4 @@
-"""Train the HyperField Transformer against Gemma 3 teacher data."""
+"""Train the Hypertensor Field Transformer against Gemma 3 teacher data."""
 from __future__ import annotations
 
 import argparse
@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 from typing import Optional, Tuple
 
-from htfr.checkpoint import HFTCheckpoint, StageState, save_hft_checkpoint
+from htfr.checkpoint import HTFTCheckpoint, StageState, save_htft_checkpoint
 from htfr.context import ContextBuilder, ContextBuilderConfig, build_context_samples
 from htfr.data.gemma_adapter import (
     GemmaConfig,
@@ -27,10 +27,10 @@ from htfr.feature_ops import (
     make_block_srht,
     make_count_sketch,
 )
-from htfr.hyperfield_transformer import HyperFieldTransformer, StageRuntime
+from htfr.hypertensor_field_transformer import HypertensorFieldTransformer, StageRuntime
 from htfr.initialization import random_hypertensors
 from htfr.model import HTFRModel
-from htfr.trainer import HFTTrainer
+from htfr.trainer import HTFTTrainer
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,8 +46,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-examples", type=int, default=2048, help="Max windows for training")
     parser.add_argument("--max-eval-examples", type=int, default=512, help="Max windows for evaluation")
     parser.add_argument("--vocab-limit", type=int, default=4096, help="Compact vocabulary size")
-    parser.add_argument("--stage1-tensors", type=int, default=8000, help="Number of Stage-1 HyperTensors")
-    parser.add_argument("--stage2-tensors", type=int, default=16000, help="Number of Stage-2 HyperTensors")
+    parser.add_argument("--stage1-tensors", type=int, default=8000, help="Number of Stage-1 Hypertensors")
+    parser.add_argument("--stage2-tensors", type=int, default=16000, help="Number of Stage-2 Hypertensors")
     parser.add_argument("--stage1-countsketch-dim", type=int, default=32768, help="Stage-1 CountSketch dim")
     parser.add_argument("--stage1-srht-dim", type=int, default=16_384, help="Stage-1 SRHT dim")
     parser.add_argument("--stage2-countsketch-dim", type=int, default=8192, help="Stage-2 CountSketch dim")
@@ -148,7 +148,7 @@ def main() -> None:
         model=stage2_state.model,
         loss="logits_ce",
     )
-    hyperfield = HyperFieldTransformer(
+    hypertensor_transformer = HypertensorFieldTransformer(
         stage1_runtime,
         stage2_runtime,
         tail_token_count=args.tail_tokens,
@@ -158,7 +158,7 @@ def main() -> None:
     train_samples = build_context_samples(train_windows, builder, mapping)
     eval_samples = build_context_samples(eval_windows, builder, mapping)
 
-    trainer = HFTTrainer(hyperfield, builder)
+    trainer = HTFTTrainer(hypertensor_transformer, builder)
     train_metrics = trainer.train_epoch(train_samples)
     eval_metrics = trainer.evaluate(eval_samples)
 
@@ -180,7 +180,7 @@ def main() -> None:
             fh.write(json.dumps({"step": trainer.metric_log.steps[-1] if trainer.metric_log.steps else 0, **metrics_payload}) + "\n")
 
     if args.output:
-        checkpoint = HFTCheckpoint(
+        checkpoint = HTFTCheckpoint(
             stage1=StageState(
                 model=stage1_state.model,
                 srht=tuple(stage1_state.srht_params),
@@ -206,7 +206,7 @@ def main() -> None:
             },
         )
         pathlib.Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-        save_hft_checkpoint(args.output, checkpoint)
+        save_htft_checkpoint(args.output, checkpoint)
         print(f"Checkpoint saved to {args.output}")
 
 
@@ -252,7 +252,8 @@ def _build_stage_state(
     )
     model = HTFRModel(
         tensors=tensors,
-        top_k=32,
+        top_k=64,
+        train_top_k=1024,
         eta=eta,
         eta_g=eta_g,
         weight_mode="softmax",

@@ -2,10 +2,10 @@ import numpy as np
 
 from htfr.context import ContextBuilder, ContextBuilderConfig, ContextSample, ContextSignals
 from htfr.feature_ops import ProjectionStack, make_block_srht
-from htfr.hyperfield_transformer import HyperFieldTransformer, StageRuntime
+from htfr.hypertensor_field_transformer import HypertensorFieldTransformer, StageRuntime
 from htfr.initialization import random_hypertensors
 from htfr.model import HTFRModel
-from htfr.trainer import HFTTrainer
+from htfr.trainer import HTFTTrainer
 
 
 def _make_stage(projector: ProjectionStack, output_dim: int, rng: np.random.Generator) -> StageRuntime:
@@ -15,12 +15,19 @@ def _make_stage(projector: ProjectionStack, output_dim: int, rng: np.random.Gene
         output_dim=output_dim,
         rng=rng,
     )
-    model = HTFRModel(tensors=tensors, top_k=4, eta=0.05, eta_g=0.01, randomize_interpolations=False)
+    model = HTFRModel(
+        tensors=tensors,
+        top_k=4,
+        train_top_k=4,
+        eta=0.05,
+        eta_g=0.01,
+        randomize_interpolations=False,
+    )
     loss = "mse" if output_dim != 2 else "logits_ce"
     return StageRuntime(projector=projector, model=model, loss=loss)
 
 
-def test_hft_trainer_updates_metrics() -> None:
+def test_htft_trainer_updates_metrics() -> None:
     rng = np.random.default_rng(0)
     builder = ContextBuilder(
         ContextBuilderConfig(window_size=2, hidden_dim=2, hashed_dim=4, tail_tokens=1, stage1_target_dim=3)
@@ -32,7 +39,7 @@ def test_hft_trainer_updates_metrics() -> None:
     stage2_projector = ProjectionStack(raw_dim=stage2_raw_dim, srht_params=(stage2_cs,))
     stage1 = _make_stage(stage1_projector, builder.stage1_target_dim, rng)
     stage2 = _make_stage(stage2_projector, output_dim=2, rng=rng)
-    hft = HyperFieldTransformer(stage1, stage2, tail_token_count=1, tail_embedding_dim=2)
+    htft_model = HypertensorFieldTransformer(stage1, stage2, tail_token_count=1, tail_embedding_dim=2)
 
     samples = []
     for idx in range(10):
@@ -50,7 +57,7 @@ def test_hft_trainer_updates_metrics() -> None:
             )
         )
 
-    trainer = HFTTrainer(hft, builder)
+    trainer = HTFTTrainer(htft_model, builder)
     train_metrics = trainer.train_epoch(samples)
     eval_metrics = trainer.evaluate(samples)
     assert train_metrics.samples == len(samples)

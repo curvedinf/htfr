@@ -9,9 +9,10 @@ from typing import Deque, Dict, Iterable, List, Literal, Sequence, Tuple
 import numpy as np
 from numpy.random import Generator, default_rng
 
+from .faiss_index import FaissIndex
 from .interpolation import available_interpolations
 from .initialization import random_hypertensors, reseed_tensor_around_sample
-from .tensor import HyperTensor, LocalResult
+from .hypertensor import Hypertensor, LocalResult
 
 WeightMode = Literal["softmax", "inverse"]
 LossMode = Literal["mse", "logits_ce"]
@@ -28,7 +29,7 @@ def locality_weights(
     Parameters
     ----------
     distances:
-        Signed distances for the active HyperTensors.
+        Signed distances for the active Hypertensors.
     taus:
         Temperature parameters for softmax weighting.
     mode:
@@ -57,8 +58,9 @@ def locality_weights(
 class HTFRModel:
     """Hypertensor Field Regressor model."""
 
-    tensors: List[HyperTensor] = field(default_factory=list)
-    top_k: int = 32
+    tensors: List[Hypertensor] = field(default_factory=list)
+    top_k: int = 64
+    train_top_k: int = 1024
     weight_mode: WeightMode = "softmax"
     epsilon: float = 1e-6
     eta: float = 0.05
@@ -74,6 +76,7 @@ class HTFRModel:
     max_error_queue: int = 128
     relocation_interval: int = 32
     usage_decay: float = 0.995
+    faiss_probe_multiplier: int = 4
 
     def __post_init__(self) -> None:
         if self.interpolation_reference is None:
@@ -100,8 +103,12 @@ class HTFRModel:
         self._error_queue: Deque[tuple[np.ndarray, float]] = deque(
             maxlen=self.max_error_queue
         )
+        self._faiss_index: FaissIndex | None = None
+        self._faiss_dirty = False
+        if self.tensors:
+            self._ensure_faiss_index(force_init=True)
 
-    def _configure_tensor(self, tensor: HyperTensor) -> None:
+    def _configure_tensor(self, tensor: Hypertensor) -> None:
         tensor.reference_radius = self.interpolation_reference
         if tensor.dtype != self.dtype:
             tensor.dtype = self.dtype
@@ -118,7 +125,7 @@ class HTFRModel:
         return names, (weights / total)
 
     def randomize_interpolations_by_weight(self) -> None:
-        """Randomly assign interpolation modules to each HyperTensor."""
+        """Randomly assign interpolation modules to each Hypertensor."""
 
         if not self.tensors:
             return
@@ -127,7 +134,7 @@ class HTFRModel:
             tensor.reference_radius = self.interpolation_reference
             tensor.interpolation = str(self.rng.choice(names, p=probs))
 
-    def add_tensor(self, tensor: HyperTensor) -> None:
+    def add_tensor(self, tensor: Hypertensor) -> None:
         self._configure_tensor(tensor)
         if self.randomize_interpolations:
             names, probs = self._interpolation_probabilities()
@@ -136,6 +143,7 @@ class HTFRModel:
             tensor.reference_radius = self.interpolation_reference
         self.tensors.append(tensor)
         self._append_stat_slots(1)
+        self._mark_faiss_dirty()
 
     def seed_random_tensors(
         self,
@@ -145,7 +153,7 @@ class HTFRModel:
         tau: float = 1.0,
         reference_radius: float | None = None,
     ) -> None:
-        """Append ``count`` randomly initialized HyperTensors."""
+        """Append ``count`` randomly initialized Hypertensors."""
 
         reference = (
             reference_radius if reference_radius is not None else self.interpolation_reference
@@ -165,14 +173,25 @@ class HTFRModel:
     @property
     def output_dim(self) -> int:
         if not self.tensors:
-            raise ValueError("Model has no HyperTensors")
+            raise ValueError("Model has no Hypertensors")
         return self.tensors[0].output_dim
 
-    def _select_active(self, x: np.ndarray) -> List[Tuple[int, LocalResult]]:
+    def _select_active(self, x: np.ndarray, k: int) -> List[Tuple[int, LocalResult]]:
+        x_arr = np.asarray(x, dtype=np.float32)
+        self._ensure_faiss_index()
+        candidate_indices: List[int] = []
+        if self._faiss_index is not None and self._faiss_index.size:
+            _, indices = self._faiss_index.search(
+                x_arr, max(k * self.faiss_probe_multiplier, k)
+            )
+            candidate_indices = [int(idx) for idx in indices if idx >= 0]
         cache: List[Tuple[int, LocalResult]] = []
         fallback: List[Tuple[int, LocalResult]] = []
-        for idx, tensor in enumerate(self.tensors):
-            local = tensor.local(x)
+        evaluated: set[int] = set()
+
+        def evaluate(idx: int) -> None:
+            tensor = self.tensors[idx]
+            local = tensor.local(x_arr)
             if (
                 self.locality_radius is not None
                 and abs(local.distance) > self.locality_radius
@@ -180,21 +199,32 @@ class HTFRModel:
                 fallback.append((idx, local))
             else:
                 cache.append((idx, local))
+
+        for idx in candidate_indices:
+            if 0 <= idx < len(self.tensors) and idx not in evaluated:
+                evaluated.add(idx)
+                evaluate(idx)
+
+        if len(cache) < k:
+            for idx in range(len(self.tensors)):
+                if idx in evaluated:
+                    continue
+                evaluated.add(idx)
+                evaluate(idx)
+
         if not cache:
             cache = fallback
         if not cache:
-            raise ValueError("No HyperTensors available")
-        k = min(self.top_k, len(cache))
-        # select indices of k smallest absolute distances
+            raise ValueError("No Hypertensors available")
+        k = min(k, len(cache))
         absd = np.array([abs(entry[1].distance) for entry in cache])
         topk_indices = np.argpartition(absd, kth=k - 1)[:k]
         active = [cache[i] for i in topk_indices]
-        # sort for determinism
         active.sort(key=lambda item: abs(item[1].distance))
         return active
 
     def predict(self, x: np.ndarray) -> np.ndarray:
-        active = self._select_active(np.asarray(x, dtype=np.float32))
+        active = self._select_active(np.asarray(x, dtype=np.float32), self.top_k)
         distances = [entry[1].distance for entry in active]
         taus = [self.tensors[idx].tau for idx, _ in active]
         loc_weights = locality_weights(distances, taus, self.weight_mode, self.epsilon)
@@ -230,7 +260,10 @@ class HTFRModel:
         train: bool = True,
     ) -> np.ndarray:
         x_arr = np.asarray(x, dtype=np.float32)
-        active = self._select_active(x_arr)
+        active = self._select_active(
+            x_arr,
+            self.train_top_k if train else self.top_k,
+        )
         distances = [entry[1].distance for entry in active]
         taus = [self.tensors[idx].tau for idx, _ in active]
         loc_weights = locality_weights(distances, taus, self.weight_mode, self.epsilon)
@@ -264,6 +297,8 @@ class HTFRModel:
         self._record_activity([idx for idx, _ in active], distances, loss_value)
         if loss_value is not None:
             self._enqueue_error(x_arr, loss_value)
+        if train:
+            self._mark_faiss_dirty()
         return yhat.astype(self.dtype)
 
     def _compute_loss_value(
@@ -339,12 +374,35 @@ class HTFRModel:
         self._usage_counts[idle_idx] = 1.0
         self._avg_distance[idle_idx] = 0.0
         self._loss_trace[idle_idx] = 0.0
+        self._mark_faiss_dirty()
+
+    def _tensor_anchor(self, tensor: Hypertensor) -> np.ndarray:
+        normal = np.asarray(tensor.n, dtype=np.float32)
+        anchor = -float(tensor.delta) * normal
+        return anchor.astype(np.float16)
+
+    def _ensure_faiss_index(self, force_init: bool = False) -> None:
+        if not self.tensors:
+            return
+        if self._faiss_index is None or force_init:
+            input_dim = self.tensors[0].n.shape[0]
+            self._faiss_index = FaissIndex(dim=input_dim)
+            self._faiss_dirty = True
+        if self._faiss_dirty and self._faiss_index is not None:
+            anchors = np.stack([self._tensor_anchor(t) for t in self.tensors], axis=0)
+            self._faiss_index.rebuild(anchors)
+            self._faiss_dirty = False
+
+    def _mark_faiss_dirty(self) -> None:
+        if self._faiss_index is not None:
+            self._faiss_dirty = True
 
     @classmethod
     def from_tensors(
         cls,
-        tensors: Iterable[HyperTensor],
-        top_k: int = 4,
+        tensors: Iterable[Hypertensor],
+        top_k: int | None = None,
+        train_top_k: int | None = None,
         weight_mode: WeightMode = "softmax",
         epsilon: float = 1e-6,
         eta: float = 0.05,
@@ -361,9 +419,19 @@ class HTFRModel:
         relocation_interval: int = 32,
         usage_decay: float = 0.995,
     ) -> "HTFRModel":
+        default_top_k = cls.__dataclass_fields__["top_k"].default  # type: ignore[index]
+        default_train_top_k = cls.__dataclass_fields__["train_top_k"].default  # type: ignore[index]
+        resolved_top_k = top_k if top_k is not None else default_top_k
+        if train_top_k is not None:
+            resolved_train_top_k = train_top_k
+        elif top_k is not None:
+            resolved_train_top_k = top_k
+        else:
+            resolved_train_top_k = default_train_top_k
         model = cls(
             tensors=list(tensors),
-            top_k=top_k,
+            top_k=int(resolved_top_k),
+            train_top_k=int(resolved_train_top_k),
             weight_mode=weight_mode,
             epsilon=epsilon,
             eta=eta,

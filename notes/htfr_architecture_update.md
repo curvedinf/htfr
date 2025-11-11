@@ -1,8 +1,8 @@
-# HyperTensor Field Regressor Update Plan
+# Hypertensor Field Regressor Update Plan
 
 This document captures the architectural changes required to extend the
-HyperTensor Field Regressor (HTFR) — the core building block of the
-HyperField Transformer (HFT) — so it can regress over massively expanded
+Hypertensor Field Regressor (HTFR) — the core building block of the
+Hypertensor Field Transformer (HTFT) — so it can regress over massively expanded
 input vectors representing full LLM contexts.
 
 ## 1. Input Representation
@@ -26,12 +26,12 @@ input vectors representing full LLM contexts.
   capacity.
 
 ## 2. Geometry & Locality
-- Keep the existing HyperTensor primitive untouched—one normal vector,
+- Keep the existing Hypertensor primitive untouched—one normal vector,
   single offset, and per-band control columns. The expanded projected
   vector already captures the full context, so no multi-axis normals are
   needed.
 - Set the working dimension to `d = 4096` after the projection stack and
-  store every HyperTensor parameter, optimizer state, and feature cache
+  store every Hypertensor parameter, optimizer state, and feature cache
   in float16. Memory per tensor is roughly
   `2 × (d + 3 × vocab_limit)` bytes; with `vocab_limit = 4096`, an 8 GB
   budget supports ~200k tensors while still reserving slack for queues,
@@ -62,7 +62,7 @@ input vectors representing full LLM contexts.
   highlight the most predictive context components.
 
 ## 6. Precision & Storage
-- Enforce float16 everywhere: HyperTensor normals, control columns,
+- Enforce float16 everywhere: Hypertensor normals, control columns,
   SRHT/CountSketch matrices, relocation statistics, replay caches,
   optimizer momentum, and serialized checkpoints. Keep float32 scratch
   buffers only when algorithms (e.g., variance logs) require it, casting
@@ -72,7 +72,7 @@ input vectors representing full LLM contexts.
 - Ensure preprocessing kernels (CountSketch, SRHT, PCA) accept float16
   inputs while performing accumulation in float32 to avoid numerical
   collapse, then downcast the final features before feeding them to the
-  HyperField Transformer.
+  Hypertensor Field Transformer.
 
 Implementing the above keeps the HTFR core simple (no new tensor
 primitive) while scaling the feature space, initialization, and adaptive
@@ -84,10 +84,10 @@ coverage mechanisms to match LLM-sized inputs.
   similarities between raw and projected vectors on a validation batch.
   A drop >10% signals the projection dimension or hash size must grow.
 - **Projected vectors → tensor activations.** Track which inputs activate
-  each HyperTensor (average |distance|, activation frequency). Use
+  each Hypertensor (average |distance|, activation frequency). Use
   coverage histograms to confirm new contexts trigger previously
   inactive tensors; otherwise the relocation queue should reseed them.
-- **HyperTensor controls → logits.** Reconstruct teacher logits for a
+- **Hypertensor controls → logits.** Reconstruct teacher logits for a
   held-out buffer and compare via KL divergence. Monitoring KL per input
   class shows whether the control matrices encode the necessary signal.
 - **Two-stage coupling.** When a compression HTFR feeds the predictor,

@@ -2,28 +2,28 @@
 
 ## Abstract
 
-The Hypertensor Field Regressor (HTFR) is a fast, differentiable regression framework for very high-dimensional inputs. Its primitive, the HyperTensor, couples a geometric component (an oriented hyperplane) with a functional component (a local interpolation operator) to form a smooth, piecewise-linear field. A prediction is a locality-weighted blend of a small set of HyperTensors. HTFR supports online, error-driven learning (backprop-style), KNN-style locality, and scales to hundreds of thousands of input dimensions with structured projections. It targets tasks where large neural networks are accurate but too slow or heavy, such as token-wise next-logit regression from LLM internal features.
+The Hypertensor Field Regressor (HTFR) is a fast, differentiable regression framework for very high-dimensional inputs. Its primitive, the Hypertensor, couples a geometric component (an oriented hyperplane) with a functional component (a local interpolation operator) to form a smooth, piecewise-linear field. A prediction is a locality-weighted blend of a small set of Hypertensors. HTFR supports online, error-driven learning (backprop-style), KNN-style locality, and scales to hundreds of thousands of input dimensions with structured projections. It targets tasks where large neural networks are accurate but too slow or heavy, such as token-wise next-logit regression from LLM internal features.
 
 ---
 
-## HyperField Transformer Pipeline
+## Hypertensor Field Transformer Pipeline
 
-The repository now focuses on the two-stage HyperField Transformer
-(HFT) described in `notes/htfr_llm_adaptation.md`. The new workflow
+The repository now focuses on the two-stage Hypertensor Field Transformer
+(HTFT) described in `notes/htfr_llm_adaptation.md`. The new workflow
 replaces the legacy single-stage scripts and provides a reusable trainer
 plus a simple benchmarking harness.
 
-### Train the HFT against Gemma 3 270M
+### Train the HTFT against Gemma 3 270M
 
 ```
-python examples/train_hft.py \
+python examples/train_htft.py \
     --hf-token "$HF_TOKEN" \
     --model google/gemma-3-270m \
     --train-tokens 200000 \
     --eval-tokens 50000 \
     --seq-len 128 \
     --stride 64 \
-    --output checkpoints/hft_gemma270m.npz \
+    --output checkpoints/htft_gemma270m.npz \
     --metrics-path logs/train_metrics.jsonl
 ```
 
@@ -31,7 +31,7 @@ Key features:
 
 - **Full-context capture.** The `GemmaAdapter` streams sliding windows
   from WikiText (or your dataset of choice) while emitting the hidden
-  states, logits, and next-token targets required by the HFT pipeline.
+  states, logits, and next-token targets required by the HTFT pipeline.
 - **Context builder.** `htfr.context.ContextBuilder` concatenates the
   hidden states, hashed n-gram indicators, and synthetic ROPE phases
   before projecting them through CountSketch + SRHT stacks to reach the
@@ -39,14 +39,15 @@ Key features:
 - **Two-stage training.** Stage 1 regresses a 1k context embedding
   (supervised by a projected teacher hidden state) while Stage 2 predicts
   truncated next-token logits from that embedding plus the uncompressed
-  16-token tail. Both stages default to `top_k=32` active HyperTensors to
-  match the Gemma-3-270M capacity budget.
-- **Checkpointing.** `htfr.checkpoint.save_hft_checkpoint` persists both
+  16-token tail. Both stages default to `top_k=64` for inference but use
+  `train_top_k=1024` during learning to expose far more tensors before
+  gradients are applied.
+- **Checkpointing.** `htfr.checkpoint.save_htft_checkpoint` persists both
   stages, their projection stacks, and the compact vocabulary mapping so
   training can resume or the model can be shared.
 - **Metrics.** The trainer logs student and teacher perplexity into the
   optional JSONL file so you can track convergence without rerunning the
-  teacher. Use `examples/benchmark_hft.py logs/train_metrics.jsonl` to
+  teacher. Use `examples/benchmark_htft.py logs/train_metrics.jsonl` to
   summarize the trend once training finishes.
 
 The defaults allocate ~8k Stage‑1 tensors and ~16k Stage‑2 tensors
@@ -56,7 +57,7 @@ once trained.
 
 ---
 
-## 1. HyperTensor Primitive
+## 1. Hypertensor Primitive
 
 - **Domain/Range.** Input \(x\in\mathbb{R}^D\), output \(y\in\mathbb{R}^M\).
 - **Geometry.**
@@ -70,20 +71,20 @@ once trained.
     - If \(d' < 0\): \(\alpha = (a_{\text{neg}}, 1-a_{\text{neg}}, 0)\) with \(a_{\text{neg}} = -d' / d_{\text{neg}}\).
   - Local interpolant: \(L(x) = C\,\alpha\).
 
-**Definition.** A HyperTensor is \((n, \delta, d_{\text{neg}}, d_{\text{pos}}, C)\). It maps \(x\mapsto L(x)\) with continuous (C⁰) output and constant gradient within each half-band.
+**Definition.** A Hypertensor is \((n, \delta, d_{\text{neg}}, d_{\text{pos}}, C)\). It maps \(x\mapsto L(x)\) with continuous (C⁰) output and constant gradient within each half-band.
 
 ---
 
 ## 2. HTFR Model
 
-Given HyperTensors \(\{T_i\}_{i=1}^N\), define distances \(d_i(x)\) and local interpolants \(L_i(x)\).
+Given Hypertensors \(\{T_i\}_{i=1}^N\), define distances \(d_i(x)\) and local interpolants \(L_i(x)\).
 
 - **Locality weights.** Top-\(K\) selection by smallest \(|d_i(x)|\) (with \(K\)). Weights over the active set:
   - Softmax: \(w_i(x) = \frac{\exp(-|d_i(x)|/\tau_i)}{\sum_{j\in\mathcal{A}(x)} \exp(-|d_j(x)|/\tau_j)}\).
   - Inverse-distance: \(w_i(x) = \frac{(|d_i(x)|+\varepsilon)^{-1}}{\sum_{j\in\mathcal{A}(x)}(|d_j(x)|+\varepsilon)^{-1}}\).
 - **Prediction.** \(\hat y = f(x) = \sum_{i\in\mathcal{A}(x)} w_i(x)\,L_i(x)\).
 
-This is a HyperTensor field: a smooth blend of oriented, local, 1-D interpolators embedded in \(\mathbb{R}^D\).
+This is a Hypertensor field: a smooth blend of oriented, local, 1-D interpolators embedded in \(\mathbb{R}^D\).
 
 ---
 
@@ -139,15 +140,15 @@ Per query with top-\(K\):
 - Interpolants & blend: \(\mathcal{O}(K M)\).
 - Updates: same as inference plus \(\mathcal{O}(K D)\).
 
-Large-\(D\) compatibility. Use a fast structured projection \(P\) (SRHT/CountSketch), learn HyperTensors in \(P x\)-space (\(d \ll D\)). All formulas hold with \(x\) replaced by \(P x\).
+Large-\(D\) compatibility. Use a fast structured projection \(P\) (SRHT/CountSketch), learn Hypertensors in \(P x\)-space (\(d \ll D\)). All formulas hold with \(x\) replaced by \(P x\).
 
 ---
 
 ## 6. Properties
 
 - **Continuity:** \(f(x)\) is continuous; gradients are piecewise constant inside bands; kinks only at band edges.
-- **Locality:** Only the top-\(K\) closest HyperTensors are active; predictable latency.
-- **Interpretability:** Each HyperTensor exposes a direction \(n\), a position \(\delta\), and a local response profile \(C\).
+- **Locality:** Only the top-\(K\) closest Hypertensors are active; predictable latency.
+- **Interpretability:** Each Hypertensor exposes a direction \(n\), a position \(\delta\), and a local response profile \(C\).
 - **Expressivity:** A finite blend of oriented, piecewise-linear local maps can approximate continuous functions on compact sets to arbitrary precision (via sufficient coverage and control resolution).
 - **Regularization:** L2 on \(n\), band width priors, sparsity on active counts.
 
@@ -157,7 +158,7 @@ Large-\(D\) compatibility. Use a fast structured projection \(P\) (SRHT/CountSke
 
 - **KNN-HTFR:** select \(\mathcal{A}(x)\) by KNN in \(d\) (fast, simple).
 - **Kernel-HTFR:** alternate weighting (e.g., triangular, Epanechnikov).
-- **C¹ HyperTensors:** replace linear with cubic Hermite along \(d\) for continuous gradients.
+- **C¹ Hypertensors:** replace linear with cubic Hermite along \(d\) for continuous gradients.
 - **Vector-valued geometry:** allow multiple normals per unit (multi-axis interpolation).
 - **Shared decoder:** for very large \(M\) (e.g., vocab logits), map \(L_i\) then decode with shared head.
 
@@ -178,7 +179,7 @@ class LocalResult:
     clipped_distance: float
     distance_derivative: np.ndarray
 
-class HyperTensor:
+class Hypertensor:
     def __init__(self, n, delta, dneg, dpos, C, tau=1.0):
         self.n = n / (np.linalg.norm(n) + 1e-8)
         self.delta = float(delta)
@@ -243,7 +244,7 @@ Single block; 4-space indentation; vectorizable; easy to port to JAX/PyTorch (tr
 ## 9. Deployment Patterns
 
 - **LLM token regression:** Feed per-token, per-head RoPE features; optionally sketch to \(d\); train HTFR to predict logits. Use shared decoder if \(M\) is large.
-- **Streaming:** Top-\(K\) active updates per sample; periodic reseeding of low-usage HyperTensors.
+- **Streaming:** Top-\(K\) active updates per sample; periodic reseeding of low-usage Hypertensors.
 - **Indexing:** For large \(N\), maintain an ANN index over signed distances (or normals) to shortlist candidates before exact top-\(K\).
 
 ---
@@ -261,14 +262,14 @@ Single block; 4-space indentation; vectorizable; easy to port to JAX/PyTorch (tr
 
 - Non-C¹ kinks at band edges → use Hermite interpolation if needed.
 - Geometry drift instability if \(\eta_g\) too large → use orthonormality and gradient clipping.
-- Coverage gaps if \(N\) too small → reseed low-usage HyperTensors and widen bands.
+- Coverage gaps if \(N\) too small → reseed low-usage Hypertensors and widen bands.
 - Very large \(N\) cost → top-\(K\) with ANN prefilter + batching.
 
 ---
 
 ## 12. Summary (one-line)
 
-HTFR replaces heavy deep stacks with a field of small, interpretable HyperTensors that interpolate along learned directions and are trained end-to-end with backprop-style updates, delivering strong accuracy at low latency on ultra-high-dimensional inputs.
+HTFR replaces heavy deep stacks with a field of small, interpretable Hypertensors that interpolate along learned directions and are trained end-to-end with backprop-style updates, delivering strong accuracy at low latency on ultra-high-dimensional inputs.
 
 ---
 
@@ -276,21 +277,21 @@ HTFR replaces heavy deep stacks with a field of small, interpretable HyperTensor
 
 This repository provides a NumPy implementation of HTFR that closely follows the white paper.
 
-- [`htfr.tensor.HyperTensor`](htfr/tensor.py) implements the geometric primitive with piecewise-linear interpolation.
-- [`htfr.model.HTFRModel`](htfr/model.py) wraps multiple HyperTensors, performs top-\(K\) locality selection, computes softmax or inverse-distance weights, and applies online updates using MSE or softmax cross-entropy gradients.
-- [`htfr.initialization`](htfr/initialization.py) contains lightweight k-means clustering and principal-direction routines to seed HyperTensors from data.
+- [`htfr.hypertensor.Hypertensor`](htfr/hypertensor.py) implements the geometric primitive with piecewise-linear interpolation.
+- [`htfr.model.HTFRModel`](htfr/model.py) wraps multiple Hypertensors, performs top-\(K\) locality selection, computes softmax or inverse-distance weights, and applies online updates using MSE or softmax cross-entropy gradients.
+- [`htfr.initialization`](htfr/initialization.py) contains lightweight k-means clustering and principal-direction routines to seed Hypertensors from data.
 
 ### Quickstart
 
 ```python
 import numpy as np
-from htfr import HyperTensor, HTFRModel
+from htfr import Hypertensor, HTFRModel
 
 # build a toy model with two tensors
 output_dim = 1
-ht1 = HyperTensor(n=np.array([1.0, 0.0]), delta=0.0, dneg=-1.0, dpos=1.0,
+ht1 = Hypertensor(n=np.array([1.0, 0.0]), delta=0.0, dneg=-1.0, dpos=1.0,
                   C=np.array([[0.0, 0.5, 1.0]]))
-ht2 = HyperTensor(n=np.array([-1.0, 0.5]), delta=0.2, dneg=-0.5, dpos=0.5,
+ht2 = Hypertensor(n=np.array([-1.0, 0.5]), delta=0.2, dneg=-0.5, dpos=0.5,
                   C=np.array([[1.0, 0.3, -0.2]]), tau=0.5)
 model = HTFRModel.from_tensors([ht1, ht2], top_k=2)
 

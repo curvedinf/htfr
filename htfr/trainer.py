@@ -1,4 +1,4 @@
-"""Training helpers for the HyperField Transformer."""
+"""Training helpers for the Hypertensor Field Transformer."""
 from __future__ import annotations
 
 import math
@@ -8,7 +8,7 @@ from typing import Iterable, List, Sequence
 import numpy as np
 
 from .context import ContextBuilder, ContextSample
-from .hyperfield_transformer import HyperFieldTransformer
+from .hypertensor_field_transformer import HypertensorFieldTransformer
 
 
 @dataclass(frozen=True)
@@ -33,10 +33,10 @@ class MetricLog:
         self.perplexities.append(perplexity)
 
 
-class HFTTrainer:
+class HTFTTrainer:
     """High-level trainer coordinating both stages."""
 
-    def __init__(self, model: HyperFieldTransformer, builder: ContextBuilder) -> None:
+    def __init__(self, model: HypertensorFieldTransformer, builder: ContextBuilder) -> None:
         self.model = model
         self.builder = builder
         self.metric_log = MetricLog()

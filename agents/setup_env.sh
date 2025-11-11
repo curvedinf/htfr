@@ -6,7 +6,7 @@ VENV="${ROOT}/.venv"
 ENV_FILE="${ROOT}/.env"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 EXTRAS="${HTFR_SETUP_EXTRAS:-benchmark,dev,rocm}"
-INSTALL_ROCM_TORCH="${HTFR_INSTALL_ROCM_TORCH:-0}"
+INSTALL_ROCM_TORCH="${HTFR_INSTALL_ROCM_TORCH:-1}"
 ROCM_INDEX_URL="${HTFR_ROCM_INDEX_URL:-https://download.pytorch.org/whl/nightly/rocm7.0}"
 
 echo "[setup_env] Using repository root: ${ROOT}"
@@ -42,6 +42,8 @@ if [[ "${INSTALL_ROCM_TORCH}" == "1" ]]; then
   python -m pip install --pre --force-reinstall \
     --index-url "${ROCM_INDEX_URL}" \
     torch torchvision torchaudio
+  echo "[setup_env] Removing incompatible CPU-only extensions (e.g., xformers)"
+  python -m pip uninstall -y xformers >/dev/null 2>&1 || true
 fi
 
 echo "[setup_env] Environment ready."

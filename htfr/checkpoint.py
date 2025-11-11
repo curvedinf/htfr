@@ -1,4 +1,4 @@
-"""Serialization helpers for HyperField Transformer checkpoints."""
+"""Serialization helpers for Hypertensor Field Transformer checkpoints."""
 from __future__ import annotations
 
 import json
@@ -10,7 +10,7 @@ import numpy as np
 
 from .feature_ops import CountSketchParameters, SRHTParameters
 from .model import HTFRModel
-from .tensor import HyperTensor
+from .hypertensor import Hypertensor
 
 
 @dataclass(frozen=True)
@@ -24,8 +24,8 @@ class StageState:
 
 
 @dataclass(frozen=True)
-class HFTCheckpoint:
-    """Bundle containing both stages of the HyperField Transformer."""
+class HTFTCheckpoint:
+    """Bundle containing both stages of the Hypertensor Field Transformer."""
 
     stage1: StageState
     stage2: StageState
@@ -36,7 +36,7 @@ class HFTCheckpoint:
     metadata: Dict[str, Any]
 
 
-def save_hft_checkpoint(path: str | Path, checkpoint: HFTCheckpoint) -> None:
+def save_htft_checkpoint(path: str | Path, checkpoint: HTFTCheckpoint) -> None:
     """Persist the provided checkpoint to ``path``."""
 
     arrays: Dict[str, np.ndarray] = {}
@@ -52,8 +52,8 @@ def save_hft_checkpoint(path: str | Path, checkpoint: HFTCheckpoint) -> None:
     np.savez_compressed(Path(path), **arrays)
 
 
-def load_hft_checkpoint(path: str | Path) -> HFTCheckpoint:
-    """Load a checkpoint previously saved via :func:`save_hft_checkpoint`."""
+def load_htft_checkpoint(path: str | Path) -> HTFTCheckpoint:
+    """Load a checkpoint previously saved via :func:`save_htft_checkpoint`."""
 
     with np.load(Path(path), allow_pickle=False) as arrays:
         data = {key: arrays[key] for key in arrays.files}
@@ -64,7 +64,7 @@ def load_hft_checkpoint(path: str | Path) -> HFTCheckpoint:
     unk_index = int(np.asarray(data["unk_index"]).item())
     tail_config = json.loads(str(np.asarray(data["tail_config_json"], dtype=np.dtype("U"))[0]))
     metadata = json.loads(str(np.asarray(data["metadata_json"], dtype=np.dtype("U"))[0]))
-    return HFTCheckpoint(
+    return HTFTCheckpoint(
         stage1=stage1,
         stage2=stage2,
         mapping=mapping,
@@ -92,6 +92,9 @@ def _deserialize_stage(prefix: str, arrays: Dict[str, np.ndarray]) -> StageState
     model = HTFRModel.from_tensors(
         tensors,
         top_k=int(np.asarray(arrays[f"{prefix}_model_top_k"]).item()),
+        train_top_k=int(np.asarray(arrays[f"{prefix}_model_train_top_k"]).item())
+        if f"{prefix}_model_train_top_k" in arrays
+        else None,
         weight_mode=str(np.asarray(arrays[f"{prefix}_model_weight_mode"], dtype=np.dtype("U"))[0]),
         epsilon=float(np.asarray(arrays[f"{prefix}_model_epsilon"]).item()),
         eta=float(np.asarray(arrays[f"{prefix}_model_eta"]).item()),
@@ -133,7 +136,7 @@ def _deserialize_stage(prefix: str, arrays: Dict[str, np.ndarray]) -> StageState
     return StageState(model=model, srht=tuple(srht_params), countsketch=countsketch, metadata=metadata)
 
 
-def _stack_tensors(tensors: Iterable[HyperTensor], prefix: str) -> Dict[str, np.ndarray]:
+def _stack_tensors(tensors: Iterable[Hypertensor], prefix: str) -> Dict[str, np.ndarray]:
     normals = []
     deltas = []
     dneg = []
@@ -163,7 +166,7 @@ def _stack_tensors(tensors: Iterable[HyperTensor], prefix: str) -> Dict[str, np.
     }
 
 
-def _rebuild_tensors(prefix: str, arrays: Dict[str, np.ndarray]) -> list[HyperTensor]:
+def _rebuild_tensors(prefix: str, arrays: Dict[str, np.ndarray]) -> list[Hypertensor]:
     normals = np.asarray(arrays[f"{prefix}_tensor_normals"], dtype=np.float32)
     deltas = np.asarray(arrays[f"{prefix}_tensor_deltas"], dtype=np.float32)
     dneg = np.asarray(arrays[f"{prefix}_tensor_dneg"], dtype=np.float32)
@@ -174,10 +177,10 @@ def _rebuild_tensors(prefix: str, arrays: Dict[str, np.ndarray]) -> list[HyperTe
         arrays[f"{prefix}_tensor_interpolations"], dtype=np.dtype("U16")
     )
     references = np.asarray(arrays[f"{prefix}_tensor_reference_radius"], dtype=np.float32)
-    tensors: list[HyperTensor] = []
+    tensors: list[Hypertensor] = []
     for idx in range(normals.shape[0]):
         tensors.append(
-            HyperTensor(
+            Hypertensor(
                 normals[idx],
                 float(deltas[idx]),
                 float(dneg[idx]),
@@ -194,6 +197,7 @@ def _rebuild_tensors(prefix: str, arrays: Dict[str, np.ndarray]) -> list[HyperTe
 def _serialize_model_config(prefix: str, model: HTFRModel) -> Dict[str, np.ndarray]:
     return {
         f"{prefix}_model_top_k": np.array([model.top_k], dtype=np.int32),
+        f"{prefix}_model_train_top_k": np.array([model.train_top_k], dtype=np.int32),
         f"{prefix}_model_eta": np.array([model.eta], dtype=np.float32),
         f"{prefix}_model_eta_g": np.array([model.eta_g], dtype=np.float32),
         f"{prefix}_model_epsilon": np.array([model.epsilon], dtype=np.float32),

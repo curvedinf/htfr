@@ -1,4 +1,4 @@
-"""Interpolation modules for HyperTensors."""
+"""Interpolation modules for Hypertensors."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,7 +18,7 @@ class InterpolationResult:
 
 
 class InterpolationModule(Protocol):
-    """Protocol implemented by HyperTensor interpolation modules."""
+    """Protocol implemented by Hypertensor interpolation modules."""
 
     name: str
 

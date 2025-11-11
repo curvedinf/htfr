@@ -6,7 +6,7 @@ from typing import List
 
 import numpy as np
 
-from .tensor import HyperTensor
+from .hypertensor import Hypertensor
 
 
 @dataclass
@@ -60,8 +60,8 @@ def initialize_hypertensors(
     tau: float = 1.0,
     reference_radius: float | None = None,
     rng: np.random.Generator | None = None,
-) -> List[HyperTensor]:
-    """Construct an initial set of HyperTensors following the whitepaper."""
+) -> List[Hypertensor]:
+    """Construct an initial set of Hypertensors following the whitepaper."""
 
     if rng is None:
         rng = np.random.default_rng()
@@ -71,7 +71,7 @@ def initialize_hypertensors(
         raise ValueError("Mismatched data and output lengths")
 
     clusters = kmeans(data, k=k, rng=rng)
-    tensors: List[HyperTensor] = []
+    tensors: List[Hypertensor] = []
     for idx in range(k):
         mask = clusters.assignments == idx
         if not np.any(mask):
@@ -89,7 +89,7 @@ def initialize_hypertensors(
             [local_mean, local_mean, local_mean], axis=-1
         ).astype(np.float32)
         tensors.append(
-            HyperTensor(
+            Hypertensor(
                 direction,
                 offset,
                 dneg,
@@ -109,8 +109,8 @@ def random_hypertensor(
     reference_radius: float = 5.0,
     rng: np.random.Generator | None = None,
     dtype: np.dtype = np.float16,
-) -> HyperTensor:
-    """Return a randomly initialized HyperTensor."""
+) -> Hypertensor:
+    """Return a randomly initialized Hypertensor."""
 
     if rng is None:
         rng = np.random.default_rng()
@@ -120,7 +120,7 @@ def random_hypertensor(
     offset = float(rng.normal(scale=0.5))
     span = float(rng.uniform(0.1, 1.0))
     controls = rng.normal(scale=0.05, size=(output_dim, 3)).astype(np.float32)
-    return HyperTensor(
+    return Hypertensor(
         normal.astype(dtype),
         offset,
         -span,
@@ -140,10 +140,10 @@ def random_hypertensors(
     reference_radius: float = 5.0,
     rng: np.random.Generator | None = None,
     dtype: np.dtype = np.float16,
-) -> List[HyperTensor]:
-    """Return ``count`` randomly initialized HyperTensors."""
+) -> List[Hypertensor]:
+    """Return ``count`` randomly initialized Hypertensors."""
 
-    tensors: List[HyperTensor] = []
+    tensors: List[Hypertensor] = []
     for _ in range(max(0, count)):
         tensors.append(
             random_hypertensor(
@@ -159,7 +159,7 @@ def random_hypertensors(
 
 
 def reseed_tensor_around_sample(
-    tensor: HyperTensor,
+    tensor: Hypertensor,
     sample: np.ndarray,
     rng: np.random.Generator | None = None,
     jitter: float = 1e-3,

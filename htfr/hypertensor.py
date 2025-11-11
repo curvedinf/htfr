@@ -1,4 +1,4 @@
-"""HyperTensor primitive implementation."""
+"""Hypertensor primitive implementation."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -11,7 +11,7 @@ from .interpolation import InterpolationResult, available_interpolations, get_in
 
 @dataclass
 class LocalResult:
-    """Container returned by :meth:`HyperTensor.local`."""
+    """Container returned by :meth:`Hypertensor.local`."""
 
     value: np.ndarray
     distance: float
@@ -20,7 +20,7 @@ class LocalResult:
     distance_derivative: np.ndarray
 
 @dataclass
-class HyperTensor:
+class Hypertensor:
     """Piecewise-linear interpolant anchored to an oriented hyperplane.
 
     Parameters
@@ -108,7 +108,7 @@ class HyperTensor:
     def to_tuple(
         self,
     ) -> Tuple[np.ndarray, float, float, float, np.ndarray, float, str, float]:
-        """Return a serializable tuple of HyperTensor parameters."""
+        """Return a serializable tuple of Hypertensor parameters."""
 
         return (
             self.n.copy(),
@@ -124,7 +124,7 @@ class HyperTensor:
     @classmethod
     def from_tuple(
         cls, params: Iterable[np.ndarray | float], dtype: np.dtype = np.float32
-    ) -> "HyperTensor":
+    ) -> "Hypertensor":
         items = list(params)
         if len(items) == 6:
             n, delta, dneg, dpos, C, tau = items
@@ -133,7 +133,7 @@ class HyperTensor:
         elif len(items) >= 8:
             n, delta, dneg, dpos, C, tau, interpolation, reference_radius = items[:8]
         else:
-            raise ValueError("Invalid HyperTensor tuple")
+            raise ValueError("Invalid Hypertensor tuple")
         return cls(
             np.array(n, dtype=dtype),
             delta,
@@ -146,10 +146,10 @@ class HyperTensor:
             dtype=dtype,
         )
 
-    def clone(self) -> "HyperTensor":
-        """Deep copy the HyperTensor."""
+    def clone(self) -> "Hypertensor":
+        """Deep copy the Hypertensor."""
 
-        return HyperTensor(*self.to_tuple(), dtype=self.dtype)
+        return Hypertensor(*self.to_tuple(), dtype=self.dtype)
 
     def renormalize(self) -> None:
         """Ensure that the normal vector remains unit length."""

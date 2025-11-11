@@ -1,4 +1,4 @@
-"""Context building utilities for HyperField Transformer training."""
+"""Context building utilities for Hypertensor Field Transformer training."""
 from __future__ import annotations
 
 from dataclasses import dataclass

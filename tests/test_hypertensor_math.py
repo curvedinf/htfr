@@ -1,11 +1,11 @@
 import numpy as np
 import pytest
 
-from htfr.tensor import HyperTensor, LocalResult
+from htfr.hypertensor import Hypertensor, LocalResult
 
 
-def make_tensor() -> HyperTensor:
-    return HyperTensor(
+def make_tensor() -> Hypertensor:
+    return Hypertensor(
         n=np.array([2.0, 0.0], dtype=np.float32),
         delta=0.0,
         dneg=-1.0,
@@ -38,10 +38,10 @@ def test_hypertensor_from_tuple_backward_compatibility() -> None:
         np.ones((1, 3), dtype=np.float32),
         0.5,
     )
-    tensor6 = HyperTensor.from_tuple(params6)
+    tensor6 = Hypertensor.from_tuple(params6)
     assert tensor6.interpolation == "lerp"
     params8 = params6 + ("local_poly", 3.0)
-    tensor8 = HyperTensor.from_tuple(params8)
+    tensor8 = Hypertensor.from_tuple(params8)
     assert tensor8.reference_radius == pytest.approx(3.0)
 
 
@@ -54,7 +54,7 @@ def test_hypertensor_clone_and_to_tuple_roundtrip() -> None:
 
 def test_hypertensor_validation_errors() -> None:
     with pytest.raises(ValueError):
-        HyperTensor(
+        Hypertensor(
             n=np.array([0.0, 0.0]),
             delta=0.0,
             dneg=-1.0,
@@ -63,7 +63,7 @@ def test_hypertensor_validation_errors() -> None:
             tau=1.0,
         )
     with pytest.raises(ValueError):
-        HyperTensor(
+        Hypertensor(
             n=np.array([1.0, 0.0]),
             delta=0.0,
             dneg=1.0,
@@ -72,7 +72,7 @@ def test_hypertensor_validation_errors() -> None:
             tau=1.0,
         )
     with pytest.raises(ValueError):
-        HyperTensor(
+        Hypertensor(
             n=np.array([1.0, 0.0]),
             delta=0.0,
             dneg=-1.0,

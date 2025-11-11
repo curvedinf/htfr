@@ -12,12 +12,13 @@ dependencies = [
     "numpy>=1.23",
     "python-dotenv>=1.0",
     "numba>=0.60",
+    "sympy>=1.12",
 ]
 
 [project.optional-dependencies]
 benchmark = [
     "datasets>=2.19",
-    "transformers>=4.41",
+    "transformers",
     "torch>=2.3",
     "huggingface_hub>=0.23",
 ]
@@ -38,9 +39,8 @@ rocm = [
     "pydantic",
     "pyyaml",
     "rich",
-    "transformers>=4.41",
+    "transformers",
     "trl",
-    "unsloth",
 ]
 
 [tool.setuptools.packages.find]

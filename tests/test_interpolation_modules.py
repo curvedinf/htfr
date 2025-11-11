@@ -4,11 +4,11 @@ import numpy as np
 
 from htfr.interpolation import available_interpolations, get_interpolation_module
 from htfr.model import HTFRModel
-from htfr.tensor import HyperTensor
+from htfr.hypertensor import Hypertensor
 
 
-def _make_tensor(interpolation: str = "lerp") -> HyperTensor:
-    return HyperTensor(
+def _make_tensor(interpolation: str = "lerp") -> Hypertensor:
+    return Hypertensor(
         n=np.array([1.0, 0.0], dtype=np.float32),
         delta=0.0,
         dneg=-1.0,

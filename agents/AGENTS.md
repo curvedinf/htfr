@@ -16,6 +16,12 @@ guidelines.
 - `test_project.sh` — ensures the virtual environment exists, activates
   it, runs `python -m compileall` over the `htfr` and `examples`
   packages, and finally executes `pytest` with coverage reporting.
+- `train_htft.sh` — activates the shared virtual environment (creating
+  it if necessary) and launches `examples/train_htft.py`, forwarding any
+  CLI arguments so you can control datasets, checkpoints, tokens, etc.
+- `benchmark_htft.sh` — loads `.venv`, then calls
+  `examples/benchmark_htft.py` with the provided metrics file to
+  summarize perplexity trends from a prior training run.
 
 Each script enables `set -euo pipefail` so unexpected failures stop the
 automation early. Python invocations run with `PYTHONUNBUFFERED=1` so

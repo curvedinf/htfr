@@ -1,7 +1,7 @@
-# HyperField Transformer for LLM Token Prediction
+# Hypertensor Field Transformer for LLM Token Prediction
 
-This note explains how to adapt HTFR into the HyperField Transformer
-(HFT), a full transformer replacement stack that regresses directly on
+This note explains how to adapt HTFR into the Hypertensor Field Transformer
+(HTFT), a full transformer replacement stack that regresses directly on
 the inputs and outputs of a language model.
 
 ## 1. Data Capture
@@ -32,7 +32,7 @@ the inputs and outputs of a language model.
   buffer is required; HTFR checkpoints themselves only store tensor
   parameters.
 
-## 3. Two-Stage HyperField Transformer
+## 3. Two-Stage Hypertensor Field Transformer
 - Stage 1 (Attention/Compression):
   - Input: raw full-context vector.
   - Output: a compact 1k-dimensional context embedding expressed as
@@ -51,15 +51,16 @@ the inputs and outputs of a language model.
   large HTFR sees them, reducing dimensionality while staying within the
   HTFR framework.
 
-## 4. Initial HyperField Transformer Parameters
+## 4. Initial Hypertensor Field Transformer Parameters
 - **Information complexity.** Stage 1 must encode head-wise attention
   structure (~12 heads × 4 layers × 128 positions) plus hashed
   permutations; empirically this demands ~40 M effective degrees of
-  freedom, so we allocate 8k HyperTensors with `top_k=16` and a learning
-  rate pair (`eta=0.04`, `eta_g=0.004`). Stage 2 models the compressed
-  embedding plus the 16-token tail; this mixture captures ~65 M
-  degrees of freedom because it must resolve 4k-class logits, so we
-  start with 16k HyperTensors, `top_k=24`, `eta=0.03`, and `eta_g=0.003`.
+  freedom, so we allocate 8k Hypertensors with inference `top_k=64`,
+  training `train_top_k=1024`, and a learning rate pair (`eta=0.04`,
+  `eta_g=0.004`). Stage 2 models the compressed embedding plus the
+  16-token tail; this mixture captures ~65 M degrees of freedom because
+  it must resolve 4k-class logits, so we start with 16k Hypertensors and
+  the same `top_k/train_top_k` split, with `eta=0.03` and `eta_g=0.003`.
 - **Perplexity contribution.** When staged against the Gemma teacher,
   Stage 1 alone reduces perplexity by ~30% (by reconstructing attention
   heat maps) while Stage 2 closes the remaining 70%. Initialize Stage 2
@@ -70,7 +71,7 @@ the inputs and outputs of a language model.
 
 ## 5. Model Capacity & Memory
 - With projected dimension `d=4096` and a 4k-token compact vocab, one
-  HyperTensor consumes roughly 65 kB. An 8 GB budget therefore supports
+  Hypertensor consumes roughly 65 kB. An 8 GB budget therefore supports
   about 120k tensors while still leaving room for projection matrices
   and optimizer state.
 - Randomly initialize tensors (Gaussian normals + scaled control
@@ -89,7 +90,7 @@ the inputs and outputs of a language model.
    compressed features retain enough information for accurate token
    regression.
 4. For deployment, run inference by executing Stage 1 (if present) and
-   Stage 2 per token; only HyperTensor parameters reside in memory, and
+   Stage 2 per token; only Hypertensor parameters reside in memory, and
    no raw training data is retained.
 
 ## 7. Inference Workflow
@@ -122,7 +123,7 @@ the inputs and outputs of a language model.
    synthesize the sin/cos pairs per head without querying the teacher.
 4. **Attention masks / stride metadata.** These are fixed functions of
   the sliding window length (`seq_len`, `stride` in
-  `examples/train_hft.py`). During inference, maintain the
+  `examples/train_htft.py`). During inference, maintain the
    same stride and window so the mask can be regenerated every step.
 5. **Hashed n-gram indicators.** Construct Bloom filters or hashed
    shingles directly from the current context buffer; the hash functions
@@ -133,7 +134,7 @@ the inputs and outputs of a language model.
      equivalents) from the raw concatenated context.
    - At inference, run Stage 1 on the buffered tokens/embeddings to
      produce synthetic Q/K/V tensors. Because Stage 1 holds only
-     HyperTensor parameters, it replaces the teacher’s internal blocks.
+     Hypertensor parameters, it replaces the teacher’s internal blocks.
 7. **Layer-wise summaries.** If the deployment keeps a thin subset of
    the original transformer (e.g., embeddings + the first layer), those
    components generate the partial hidden states before HTFR consumes
@@ -181,7 +182,7 @@ the inputs and outputs of a language model.
 - **Projected vectors → logits.** Periodically decode using cached
   projected vectors and compare logits against fresh projections of the
   same contexts; mismatches reveal drift in the projection matrices or
-  HyperTensor parameters.
+  Hypertensor parameters.
 
 Following this recipe lets HTFR operate directly on the full information
 that feeds transformer token predictions while keeping inference fast

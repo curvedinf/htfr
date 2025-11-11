@@ -2,13 +2,13 @@ import numpy as np
 import pytest
 
 from htfr.model import HTFRModel, locality_weights
-from htfr.tensor import HyperTensor
+from htfr.hypertensor import Hypertensor
 
 
-def make_tensor(output_dim: int = 1, delta: float = 0.0) -> HyperTensor:
+def make_tensor(output_dim: int = 1, delta: float = 0.0) -> Hypertensor:
     base = np.array([[0.0, 0.5, 1.0]], dtype=np.float32)
     controls = np.repeat(base, output_dim, axis=0)
-    return HyperTensor(
+    return Hypertensor(
         n=np.array([1.0], dtype=np.float32),
         delta=delta,
         dneg=-1.0,
@@ -57,7 +57,7 @@ def test_model_select_active_uses_fallback_when_radius_small() -> None:
         randomize_interpolations=False,
     )
     x = np.array([10.0], dtype=np.float32)
-    active = model._select_active(x)
+    active = model._select_active(x, k=1)
     assert len(active) == 1
     assert active[0][0] == 0
 
@@ -112,3 +112,22 @@ def test_high_error_queue_triggers_relocation() -> None:
     model.predict_and_update(x, target, loss="mse", train=True)
     assert len(model._error_queue) == 0
     assert model._usage_counts[0] >= 1.0
+
+
+def test_model_select_active_invokes_faiss_index() -> None:
+    model = make_model(top_k=1)
+
+    class StubIndex:
+        def __init__(self) -> None:
+            self.size = 1
+            self.searched = False
+
+        def search(self, query: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+            self.searched = True
+            return np.array([0.0], dtype=np.float32), np.array([0], dtype=np.int64)
+
+    stub = StubIndex()
+    model._faiss_index = stub  # type: ignore[attr-defined]
+    model._faiss_dirty = False  # type: ignore[attr-defined]
+    _ = model.predict(np.array([0.0], dtype=np.float32))
+    assert stub.searched

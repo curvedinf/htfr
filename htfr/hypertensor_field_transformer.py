@@ -1,4 +1,4 @@
-"""Two-stage HyperField Transformer built on HTFR primitives."""
+"""Two-stage Hypertensor Field Transformer built on HTFR primitives."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -19,7 +19,7 @@ class StageRuntime:
     loss: LossMode
 
 
-class HyperFieldTransformer:
+class HypertensorFieldTransformer:
     """Implements the Stage-1/Stage-2 coupling described in the design notes."""
 
     def __init__(

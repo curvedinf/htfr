@@ -1,4 +1,4 @@
-"""Summarize HyperField Transformer training metrics."""
+"""Summarize Hypertensor Field Transformer training metrics."""
 from __future__ import annotations
 
 import argparse
@@ -8,7 +8,7 @@ from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("metrics", type=str, help="Path to metrics JSONL emitted by train_hft.py")
+    parser.add_argument("metrics", type=str, help="Path to metrics JSONL emitted by train_htft.py")
     return parser.parse_args()
 
 
