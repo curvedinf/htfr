@@ -42,10 +42,13 @@ from typing import List
 
 import numpy as np
 import torch
+from dotenv import load_dotenv
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+load_dotenv(ROOT / ".env")
 
 from htfr.feature_ops import apply_block_srht
 from htfr.gemma import (

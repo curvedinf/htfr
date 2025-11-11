@@ -35,22 +35,72 @@ size, vocabulary truncation, and the evaluation output path.
 
 ### Training the Gemma 3 test HTFR
 
-To distill a reusable HTFR checkpoint that the benchmark can load, run
-[`examples/train_test_htfr.py`](examples/train_test_htfr.py). The script
-follows the SRHT-based plan described in the accompanying documentation
-and defaults to the 2.7M active-scalar budget (SRHT dim 4096, 650
-HyperTensors, 16-way gating). Example:
+[`examples/train_test_htfr.py`](examples/train_test_htfr.py) distills a
+reusable HTFR checkpoint from Gemma 3 teacher activations. It uses the
+SRHT plan described above (default SRHT dim 4096, 650 HyperTensors,
+16-way gating) and produces a single `.npz` bundle that the benchmark
+can reload. Follow the steps below to create a test model locally:
 
-```bash
-python examples/train_test_htfr.py \
-    --hf-token <HF_TOKEN> \
-    --output test_htfr_checkpoint.npz
-```
+1. **Accept the Gemma 3 license & grab a token.** Visit
+   <https://huggingface.co/google/gemma-3-270m>, accept the license, and
+   either run `huggingface-cli login` or export the token before
+   training:
 
-The resulting `.npz` file contains the SRHT projection parameters, the
-trained HyperTensors, and the truncated vocabulary mapping. Pass the
-checkpoint path to the benchmark via `--test-model` to include it in the
-perplexity summary.
+   ```bash
+   export HF_TOKEN=hf_xxx   # or pass --hf-token on the CLI
+   ```
+
+   You can also drop the credential into a local `.env` file (for
+   example, `HF_TOKEN=hf_xxx`); the CLI scripts automatically load this
+   file from the repository root via `python-dotenv`.
+
+2. **Create an environment with the benchmark extras.** Any Python 3.10+
+   environment works; install HTFR in editable mode so both the CLI
+   script and the package share the same code:
+
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install --upgrade pip
+   pip install -e .[benchmark]
+   ```
+
+3. **(Optional) Warm the Gemma weights.** The first run downloads the
+   model; doing a quick `python -c "from htfr.gemma import load_gemma_model; load_gemma_model('google/gemma-3-270m', '$HF_TOKEN')"`
+   can populate the local cache up front, which avoids a long download in
+   the training run.
+
+4. **Run the training script.** Provide an output path for the `.npz`
+   checkpoint and tweak the token counts if you need a faster smoke
+   test. The defaults target a ~2.7M parameter HTFR:
+
+   ```bash
+   python examples/train_test_htfr.py \
+       --hf-token "$HF_TOKEN" \
+       --output checkpoints/test_htfr_checkpoint.npz \
+       --train-tokens 200000 \
+       --eval-tokens 50000 \
+       --seq-len 128 \
+       --srht-dim 4096 \
+       --top-k 16
+   ```
+
+   For a laptop-friendly run, drop `--train-tokens` to ~50k and
+   `--init-tensors` to 256; the script scales linearly with these knobs
+   and automatically uses CUDA when available.
+
+5. **Use the checkpoint in the benchmark.** Pass the saved path through
+   `--test-model` to compare it against Gemma inside
+   `examples/gemma3_benchmark.py`:
+
+   ```bash
+   python examples/gemma3_benchmark.py \
+       --hf-token "$HF_TOKEN" \
+       --test-model checkpoints/test_htfr_checkpoint.npz
+   ```
+
+The `.npz` archive stores the SRHT projection, trained HyperTensors, the
+truncated vocabulary mapping, and metadata describing the teacher setup.
 
 ---
 
