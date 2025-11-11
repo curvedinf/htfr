@@ -98,6 +98,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--metrics-path", type=str, default=None, help="Optional JSONL metrics output")
     parser.add_argument("--output", type=str, default=None, help="Optional checkpoint path (.npz)")
     parser.add_argument("--seed", type=int, default=17, help="Random seed")
+    parser.add_argument(
+        "--log-interval-seconds",
+        type=float,
+        default=10.0,
+        help="Seconds between training progress logs",
+    )
     return parser.parse_args()
 
 
@@ -245,7 +251,18 @@ def main() -> None:
         len(eval_samples),
     )
 
-    trainer = HTFTTrainer(hypertensor_transformer, builder)
+    log_interval_seconds = args.log_interval_seconds
+    if log_interval_seconds <= 0:
+        logger.warning(
+            "log_interval_seconds must be positive; overriding %.3f -> 10.0",
+            log_interval_seconds,
+        )
+        log_interval_seconds = 10.0
+    trainer = HTFTTrainer(
+        hypertensor_transformer,
+        builder,
+        log_interval_seconds=log_interval_seconds,
+    )
     with log_section("Training hypertensor transformer"):
         train_metrics = trainer.train_epoch(train_samples)
     with log_section("Evaluating hypertensor transformer"):

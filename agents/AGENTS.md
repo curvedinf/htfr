@@ -1,32 +1,32 @@
-# Agent Automation Scripts
+# Agent Automation Helpers
 
-This directory provides reusable helpers for common maintenance tasks.
-All scripts assume they are executed from the repository root (or that
-`$REPO_ROOT/agents` is on disk) and rely on the top-level `AGENTS.md`
-guidelines.
+The scripts in this directory provide a reproducible interface for setting up environments, running tests, training the Hypertensor Field Transformer, and summarizing metrics. They assume you launch them from the repository root (or that `agents/` is reachable relative to the root) and follow the top-level `AGENTS.md` guidelines.
 
-## Available helpers
+## Conventions
+- All scripts enable `set -euo pipefail` so failures terminate immediately.
+- `.env` (if present) is loaded before activating the virtual environment; place secrets like `HF_TOKEN`, `HUGGINGFACE_HUB_CACHE`, or GPU selection variables here.
+- Python commands run with `PYTHONUNBUFFERED=1` so long-running jobs stream logs as they happen.
+- The shared virtual environment lives at `.venv`. Scripts call `agents/setup_env.sh` automatically if it is missing.
 
-- `setup_env.sh` — creates/refreshes `.venv` using the system
-  `python3`, upgrades `pip`, and installs `htfr` in editable mode with
-  the `benchmark`, `dev`, and ROCm-aligned extras. Set
-  `HTFR_INSTALL_ROCM_TORCH=1` (optionally overriding
-  `HTFR_ROCM_INDEX_URL`) before running to install the ROCm PyTorch
-  stack; use `HTFR_SETUP_EXTRAS` to customize which extras are installed.
-- `test_project.sh` — ensures the virtual environment exists, activates
-  it, runs `python -m compileall` over the `htfr` and `examples`
-  packages, and finally executes `pytest` with coverage reporting.
-- `train_htft.sh` — activates the shared virtual environment (creating
-  it if necessary) and launches `examples/train_htft.py`, forwarding any
-  CLI arguments so you can control datasets, checkpoints, tokens, etc.
-- `benchmark_htft.sh` — loads `.venv`, then calls
-  `examples/benchmark_htft.py` with the provided metrics file to
-  summarize perplexity trends from a prior training run.
+## Scripts
+### `setup_env.sh`
+- Creates or refreshes `.venv` using `${PYTHON_BIN:-python3}`.
+- Installs the project in editable mode with extras from `HTFR_SETUP_EXTRAS` (defaults to `benchmark,dev,rocm`).
+- When `HTFR_INSTALL_ROCM_TORCH=1` (default), uninstalls existing torch wheels and reinstalls ROCm nightlies from `${HTFR_ROCM_INDEX_URL}`. Set the variable to `0` to keep the standard PyPI wheels.
 
-Each script enables `set -euo pipefail` so unexpected failures stop the
-automation early. Python invocations run with `PYTHONUNBUFFERED=1` so
-long-running tasks stream their logs immediately. Before activating the
-virtual environment, the helpers load `.env` (if present) into the shell
-environment so GPU selection flags (`ROCM_VISIBLE_DEVICES`, etc.) and
-credentials (e.g. `HF_TOKEN`) apply to subprocesses as well as the
-Python-level dotenv integration.
+### `test_project.sh`
+- Ensures `.venv` exists, activates it, and loads `.env`.
+- Runs `python -m compileall htfr examples` followed by `pytest --cov=htfr --cov-report=term-missing --cov-report=xml`.
+- Accepts extra pytest arguments (e.g., `agents/test_project.sh -k trainer`).
+
+### `train_htft.sh`
+- Lazily bootstraps the environment, sources `.env`, and runs `examples/train_htft.py "$@"`.
+- Provides timestamped logs showing the exact CLI forwarded to the trainer. Use this wrapper for long runs so reproducible settings end up in your shell history.
+
+### `benchmark_htft.sh`
+- Loads the environment and invokes `examples/benchmark_htft.py`, forwarding arguments such as the metrics JSONL path.
+- Useful for quick summaries/CI checks without re-running teacher or student models.
+
+## Tips
+- To customize extras or skip ROCm wheels for CPU-only development, export `HTFR_SETUP_EXTRAS` / `HTFR_INSTALL_ROCM_TORCH=0` before calling `setup_env.sh`.
+- If you run training on shared clusters, set `HF_TOKEN`, dataset cache locations, and `ROCM_VISIBLE_DEVICES` in `.env` so every helper script inherits the same context.
