@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import pathlib
+import sys
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-import numpy as np
 from typing import Optional, Tuple
+
+import numpy as np
 
 from htfr.checkpoint import HTFTCheckpoint, StageState, save_htft_checkpoint
 from htfr.context import ContextBuilder, ContextBuilderConfig, build_context_samples
@@ -31,6 +36,35 @@ from htfr.hypertensor_field_transformer import HypertensorFieldTransformer, Stag
 from htfr.initialization import random_hypertensors
 from htfr.model import HTFRModel
 from htfr.trainer import HTFTTrainer
+
+LOGGER_NAME = "train_htft"
+logger = logging.getLogger(LOGGER_NAME)
+
+
+def _configure_logging() -> None:
+    """Configure a stdout logger once per process."""
+
+    if logging.getLogger().handlers:
+        return
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[train_htft][%(asctime)s] %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stdout,
+    )
+
+
+@contextmanager
+def log_section(name: str):
+    """Context manager that logs the start/end (with duration) of a section."""
+
+    logger.info("Starting %s", name)
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        duration = time.perf_counter() - start
+        logger.info("Finished %s in %.2f s", name, duration)
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,16 +102,35 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    _configure_logging()
     args = parse_args()
-    ensure_authentication(args.hf_token)
-    tokenizer, model, device = load_teacher(args.model, args.hf_token)
-    dataset = load_dataset_split(args.dataset, args.dataset_config)
-    train_tokens = build_token_stream(
-        dataset["train"]["text"], tokenizer, args.train_tokens + args.seq_len + 1
+    logger.info(
+        "HTFT training start | model=%s dataset=%s/%s seq_len=%d stride=%d seed=%d",
+        args.model,
+        args.dataset,
+        args.dataset_config,
+        args.seq_len,
+        args.stride,
+        args.seed,
     )
-    eval_tokens = build_token_stream(
-        dataset["validation"]["text"], tokenizer, args.eval_tokens + args.seq_len + 1
-    )
+
+    with log_section("Authenticating with Hugging Face Hub"):
+        ensure_authentication(args.hf_token)
+
+    with log_section(f"Loading teacher model and tokenizer ({args.model})"):
+        tokenizer, model, device = load_teacher(args.model, args.hf_token)
+
+    with log_section(f"Loading dataset splits ({args.dataset}/{args.dataset_config})"):
+        dataset = load_dataset_split(args.dataset, args.dataset_config)
+
+    with log_section("Building train token stream"):
+        train_tokens = build_token_stream(
+            dataset["train"]["text"], tokenizer, args.train_tokens + args.seq_len + 1
+        )
+    with log_section("Building eval token stream"):
+        eval_tokens = build_token_stream(
+            dataset["validation"]["text"], tokenizer, args.eval_tokens + args.seq_len + 1
+        )
 
     gemma_train_cfg = GemmaConfig(
         model_id=args.model,
@@ -95,13 +148,20 @@ def main() -> None:
         collect_logits=True,
         device=str(device),
     )
-    train_windows = collect_teacher_windows(model, train_tokens, gemma_train_cfg)
-    eval_windows = collect_teacher_windows(model, eval_tokens, gemma_eval_cfg)
+    with log_section("Collecting teacher windows (train)"):
+        train_windows = collect_teacher_windows(model, train_tokens, gemma_train_cfg, phase="train")
+    with log_section("Collecting teacher windows (eval)"):
+        eval_windows = collect_teacher_windows(model, eval_tokens, gemma_eval_cfg, phase="eval")
 
     mapping, shortlist = build_vocab_mapping(
         targets=train_tokens.numpy(), vocab_size=tokenizer.vocab_size, vocab_limit=args.vocab_limit
     )
     unk_index = shortlist.size
+    logger.info(
+        "Vocabulary mapping ready | shortlist=%d unk_index=%d",
+        shortlist.size,
+        unk_index,
+    )
 
     builder = ContextBuilder(
         ContextBuilderConfig(
@@ -137,6 +197,20 @@ def main() -> None:
         rng=rng,
         raw_dim=builder.stage1_target_dim + builder.tail_raw_dim,
     )
+    logger.info(
+        "Stage1 config | tensors=%d target_dim=%d countsketch_dim=%d srht_dim=%d",
+        args.stage1_tensors,
+        builder.stage1_target_dim,
+        args.stage1_countsketch_dim,
+        args.stage1_srht_dim,
+    )
+    logger.info(
+        "Stage2 config | tensors=%d target_dim=%d countsketch_dim=%d srht_dim=%d",
+        args.stage2_tensors,
+        args.vocab_limit + 1,
+        args.stage2_countsketch_dim,
+        args.stage2_srht_dim,
+    )
 
     stage1_runtime = StageRuntime(
         projector=stage1_state.projector,
@@ -155,16 +229,32 @@ def main() -> None:
         tail_embedding_dim=model.config.hidden_size,
     )
 
+    logger.info(
+        "Context builder configured | window=%d hidden_dim=%d hashed_dim=%d tail_tokens=%d",
+        args.seq_len,
+        model.config.hidden_size,
+        args.hashed_dim,
+        args.tail_tokens,
+    )
+
     train_samples = build_context_samples(train_windows, builder, mapping)
     eval_samples = build_context_samples(eval_windows, builder, mapping)
+    logger.info(
+        "Prepared context samples | train=%d eval=%d",
+        len(train_samples),
+        len(eval_samples),
+    )
 
     trainer = HTFTTrainer(hypertensor_transformer, builder)
-    train_metrics = trainer.train_epoch(train_samples)
-    eval_metrics = trainer.evaluate(eval_samples)
+    with log_section("Training hypertensor transformer"):
+        train_metrics = trainer.train_epoch(train_samples)
+    with log_section("Evaluating hypertensor transformer"):
+        eval_metrics = trainer.evaluate(eval_samples)
 
     teacher_logits = np.stack([window.logits for window in eval_windows if window.logits is not None])
     teacher_targets = np.array([window.target_token for window in eval_windows], dtype=np.int64)
     teacher_ppl = truncated_teacher_perplexity(teacher_logits, teacher_targets, shortlist, mapping)
+    logger.info("Teacher perplexity (truncated vocab): %.3f", teacher_ppl)
 
     metrics_payload = {
         "train_loss": train_metrics.loss,
@@ -173,13 +263,15 @@ def main() -> None:
         "eval_perplexity": eval_metrics.perplexity,
         "teacher_perplexity": teacher_ppl,
     }
-    print("Training metrics:", json.dumps(metrics_payload, indent=2))
+    logger.info("Training metrics:\n%s", json.dumps(metrics_payload, indent=2))
     if args.metrics_path:
         pathlib.Path(args.metrics_path).parent.mkdir(parents=True, exist_ok=True)
         with open(args.metrics_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps({"step": trainer.metric_log.steps[-1] if trainer.metric_log.steps else 0, **metrics_payload}) + "\n")
+        logger.info("Metrics appended to %s", args.metrics_path)
 
     if args.output:
+        logger.info("Preparing checkpoint for %s", args.output)
         checkpoint = HTFTCheckpoint(
             stage1=StageState(
                 model=stage1_state.model,
@@ -207,7 +299,7 @@ def main() -> None:
         )
         pathlib.Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         save_htft_checkpoint(args.output, checkpoint)
-        print(f"Checkpoint saved to {args.output}")
+        logger.info("Checkpoint saved to %s", args.output)
 
 
 @dataclass

@@ -1,6 +1,7 @@
 """Gemma-specific teacher data adapter."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
@@ -9,6 +10,8 @@ import torch
 from datasets import DatasetDict, load_dataset
 from huggingface_hub import login
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -39,25 +42,33 @@ class TeacherWindow:
 def ensure_authentication(token: Optional[str]) -> None:
     """Authenticate with Hugging Face Hub when a token is supplied."""
 
-    if token:
-        login(token=token, add_to_git_credential=False)
+    if not token:
+        logger.info("No Hugging Face token provided; skipping authentication.")
+        return
+    logger.info("Authenticating with Hugging Face Hub.")
+    login(token=token, add_to_git_credential=False)
 
 
 def load_teacher(model_id: str, token: Optional[str], device: Optional[str] = None) -> Tuple[AutoTokenizer, AutoModelForCausalLM, torch.device]:
     """Load the tokenizer/model pair for the teacher."""
 
+    logger.info("Loading teacher model '%s'.", model_id)
     tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
     model = AutoModelForCausalLM.from_pretrained(model_id, token=token)
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     model.to(device)
     model.eval()
+    logger.info("Teacher model ready on %s.", device)
     return tokenizer, model, device
 
 
 def load_dataset_split(dataset: str, config: str) -> DatasetDict:
     """Load the configured dataset."""
 
-    return load_dataset(dataset, config)
+    logger.info("Loading dataset split %s/%s.", dataset, config)
+    ds = load_dataset(dataset, config)
+    logger.info("Dataset split loaded with keys: %s.", ", ".join(ds.keys()))
+    return ds
 
 
 def build_token_stream(
@@ -67,21 +78,29 @@ def build_token_stream(
 ) -> torch.Tensor:
     """Tokenize enough text samples to reach ``token_limit`` tokens."""
 
+    logger.info("Building token stream up to %d tokens.", token_limit)
     ids: List[int] = []
     bos_id = getattr(tokenizer, "bos_token_id", None)
     if bos_id is not None:
         ids.append(int(bos_id))
+    progress_step = max(1, token_limit // 10)
+    next_log = progress_step
     for text in dataset_split:
         if not text:
             continue
         piece = tokenizer.encode(text, add_special_tokens=False)
         ids.extend(piece)
+        if len(ids) >= next_log:
+            capped = min(len(ids), token_limit)
+            logger.info("Tokenization progress: %d/%d tokens.", capped, token_limit)
+            next_log += progress_step
         if len(ids) >= token_limit:
             break
     if len(ids) < token_limit:
         raise RuntimeError(
             "Unable to gather enough tokens. Increase token_limit or provide more data."
         )
+    logger.info("Token stream complete (%d tokens).", token_limit)
     return torch.tensor(ids[:token_limit], dtype=torch.long)
 
 
@@ -89,12 +108,23 @@ def collect_teacher_windows(
     model: AutoModelForCausalLM,
     tokens: torch.Tensor,
     config: GemmaConfig,
+    phase: str = "teacher",
 ) -> List[TeacherWindow]:
     """Run the teacher and capture hidden states/logits per context window."""
 
     device = torch.device(config.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    logger.info(
+        "Collecting %s teacher windows (seq_len=%d stride=%d max_examples=%d device=%s).",
+        phase,
+        config.seq_len,
+        config.stride,
+        config.max_examples,
+        device,
+    )
     windows: List[TeacherWindow] = []
     max_start = tokens.size(0) - config.seq_len - 1
+    progress_step = max(1, config.max_examples // 10)
+    next_log = progress_step
     for start in range(0, max(0, max_start) + 1, config.stride):
         stop = start + config.seq_len
         window = tokens[start:stop].to(device)
@@ -115,8 +145,12 @@ def collect_teacher_windows(
         )
         if len(windows) >= config.max_examples:
             break
+        if len(windows) >= next_log:
+            logger.info("(%s) collected %d/%d windows.", phase, len(windows), config.max_examples)
+            next_log += progress_step
     if not windows:
         raise RuntimeError("No teacher windows collected; increase token budget or adjust stride.")
+    logger.info("(%s) finished window collection with %d samples.", phase, len(windows))
     return windows
 
 
@@ -127,6 +161,11 @@ def build_vocab_mapping(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Return (mapping tensor, shortlist ids) for the compact vocabulary."""
 
+    logger.info(
+        "Building vocabulary mapping (vocab_size=%d vocab_limit=%d).",
+        vocab_size,
+        vocab_limit,
+    )
     counts = np.bincount(targets, minlength=vocab_size)
     topk = np.argsort(-counts)[: min(vocab_limit, vocab_size)]
     shortlist = topk
@@ -151,4 +190,6 @@ def truncated_teacher_perplexity(
     row = np.arange(compact.shape[0])
     token_probs = np.clip(compact[row, compact_targets], 1e-12, None)
     nll = -np.log(token_probs)
-    return float(np.exp(np.mean(nll)))
+    ppl = float(np.exp(np.mean(nll)))
+    logger.info("Computed truncated teacher perplexity: %.3f.", ppl)
+    return ppl
