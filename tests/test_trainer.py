@@ -1,6 +1,12 @@
 import numpy as np
 
-from htfr.context import ContextBuilder, ContextBuilderConfig, ContextSample, ContextSignals
+from htfr.context import (
+    ContextBatchProducer,
+    ContextBuilder,
+    ContextBuilderConfig,
+    ContextSample,
+    ContextSignals,
+)
 from htfr.feature_ops import ProjectionStack, make_block_srht
 from htfr.hypertensor_field_transformer import HypertensorFieldTransformer, StageRuntime
 from htfr.initialization import random_hypertensors
@@ -57,8 +63,41 @@ def test_htft_trainer_updates_metrics() -> None:
             )
         )
 
-    trainer = HTFTTrainer(htft_model, builder)
+    trainer = HTFTTrainer(
+        htft_model,
+        builder,
+        batch_size=3,
+        batch_workers=2,
+        pipeline_enabled=True,
+    )
     train_metrics = trainer.train_epoch(samples)
     eval_metrics = trainer.evaluate(samples)
     assert train_metrics.samples == len(samples)
     assert eval_metrics.perplexity > 0.0
+    assert trainer.metric_log.steps[-1] == len(samples)
+
+
+def test_context_batch_producer_shapes() -> None:
+    builder = ContextBuilder(
+        ContextBuilderConfig(window_size=2, hidden_dim=2, hashed_dim=4, tail_tokens=1, stage1_target_dim=3)
+    )
+    samples = []
+    for idx in range(5):
+        hidden = np.full((2, 2), idx, dtype=np.float32)
+        signals = ContextSignals(
+            token_ids=np.array([idx, idx + 1], dtype=np.int64),
+            hidden_states=hidden,
+        )
+        samples.append(
+            ContextSample(
+                signals=signals,
+                target_token=idx % 2,
+                stage1_target=builder.stage1_target_from_signals(signals),
+            )
+        )
+    producer = ContextBatchProducer(builder, samples, batch_size=2, max_workers=1, prefetch_batches=1)
+    batches = list(producer)
+    assert sum(batch.sample_count for batch in batches) == len(samples)
+    for batch in batches:
+        assert batch.stage1_inputs.shape[1] == builder.raw_dim
+        assert batch.stage1_targets.shape[1] == builder.stage1_target_dim

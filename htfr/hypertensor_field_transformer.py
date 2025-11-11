@@ -7,7 +7,7 @@ from typing import Optional
 import numpy as np
 
 from .feature_ops import ProjectionStack
-from .model import HTFRModel, LossMode
+from .model import HTFRModel, LossMode, ModelStepMetrics
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,16 @@ class StageRuntime:
     projector: ProjectionStack
     model: HTFRModel
     loss: LossMode
+
+
+@dataclass(frozen=True)
+class StepResult:
+    """Return value for :meth:`HypertensorFieldTransformer.step`."""
+
+    logits: np.ndarray
+    embedding: np.ndarray
+    stage1_metrics: ModelStepMetrics | None
+    stage2_metrics: ModelStepMetrics | None
 
 
 class HypertensorFieldTransformer:
@@ -53,15 +63,56 @@ class HypertensorFieldTransformer:
         stage1_target: Optional[np.ndarray] = None,
         stage1_extra: Optional[np.ndarray] = None,
         train: bool = False,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> StepResult:
         """Run one autoregressive step through both stages."""
 
-        embedding = self._run_stage1(
+        embedding, stage1_metrics = self.run_stage1(
             context_vector,
             extra=stage1_extra,
             target=stage1_target,
             train=train and stage1_target is not None,
         )
+        logits, stage2_metrics = self.run_stage2(
+            embedding,
+            tail_embeddings,
+            target_token,
+            train=train,
+        )
+        return StepResult(
+            logits=logits,
+            embedding=embedding,
+            stage1_metrics=stage1_metrics,
+            stage2_metrics=stage2_metrics,
+        )
+
+    def run_stage1(
+        self,
+        context_vector: np.ndarray,
+        *,
+        extra: Optional[np.ndarray] = None,
+        target: Optional[np.ndarray] = None,
+        train: bool = False,
+    ) -> tuple[np.ndarray, ModelStepMetrics | None]:
+        """Execute Stage 1 independently for parallel/pipelined use."""
+
+        embedding = self._run_stage1(
+            context_vector,
+            extra=extra,
+            target=target,
+            train=train and target is not None,
+        )
+        return embedding, self.stage1.model.last_step_metrics()
+
+    def run_stage2(
+        self,
+        embedding: np.ndarray,
+        tail_embeddings: Optional[np.ndarray],
+        target_token: Optional[int],
+        *,
+        train: bool = False,
+    ) -> tuple[np.ndarray, ModelStepMetrics | None]:
+        """Execute Stage 2 given a prepared Stage 1 embedding."""
+
         tail_vector = self._prepare_tail(tail_embeddings)
         stage2_raw = np.concatenate([embedding.astype(np.float32), tail_vector], axis=0)
         logits = self._run_stage2(
@@ -69,7 +120,7 @@ class HypertensorFieldTransformer:
             target_token,
             train=train and target_token is not None,
         )
-        return logits, embedding
+        return logits, self.stage2.model.last_step_metrics()
 
     def _run_stage1(
         self,
@@ -134,6 +185,8 @@ class HypertensorFieldTransformer:
         return {
             "stage1_usage": self.stage1.model._usage_counts.copy(),
             "stage1_loss": self.stage1.model._loss_trace.copy(),
+             "stage1_updates": self.stage1.model._update_counts.copy(),
             "stage2_usage": self.stage2.model._usage_counts.copy(),
             "stage2_loss": self.stage2.model._loss_trace.copy(),
+             "stage2_updates": self.stage2.model._update_counts.copy(),
         }

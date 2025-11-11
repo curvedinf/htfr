@@ -2,14 +2,20 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from typing import Iterable, Sequence, Tuple
 
 import numpy as np
 
-try:  # pragma: no cover - optional dependency
-    from numba import njit, prange
-except Exception:  # pragma: no cover - fallback path
+_DISABLE_NUMBA = os.environ.get("HTFR_DISABLE_NUMBA", "").lower() in {"1", "true", "yes"}
+if not _DISABLE_NUMBA:  # pragma: no cover - optional dependency
+    try:
+        from numba import njit, prange
+    except Exception:  # pragma: no cover - fallback path
+        njit = None
+        prange = range
+else:  # pragma: no cover - explicit fallback
     njit = None
     prange = range
 

@@ -44,19 +44,32 @@ def test_hypertensor_field_transformer_step_and_diagnostics() -> None:
     context = np.array([0.1, -0.2, 0.3], dtype=np.float32)
     tail_embeddings = np.array([[0.05], [0.1]], dtype=np.float32)
     stage1_target = np.zeros(embedding_dim, dtype=np.float32)
-    logits, embedding = htft_model.step(
+    result = htft_model.step(
         context,
         tail_embeddings,
         target_token=1,
         stage1_target=stage1_target,
         train=True,
     )
-    assert logits.shape == (3,)
-    assert embedding.shape == (embedding_dim,)
+    assert result.logits.shape == (3,)
+    assert result.embedding.shape == (embedding_dim,)
 
     # Ensure inference path works without targets.
-    eval_logits, _ = htft_model.step(context, tail_embeddings, target_token=None, stage1_target=None, train=False)
-    assert eval_logits.shape == (3,)
+    eval_result = htft_model.step(
+        context,
+        tail_embeddings,
+        target_token=None,
+        stage1_target=None,
+        train=False,
+    )
+    assert eval_result.logits.shape == (3,)
 
     diag = htft_model.diagnostics()
-    assert set(diag.keys()) == {"stage1_usage", "stage1_loss", "stage2_usage", "stage2_loss"}
+    assert set(diag.keys()) == {
+        "stage1_usage",
+        "stage1_loss",
+        "stage1_updates",
+        "stage2_usage",
+        "stage2_loss",
+        "stage2_updates",
+    }

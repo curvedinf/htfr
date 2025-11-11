@@ -10,12 +10,21 @@ import numpy as np
 from numpy.random import Generator, default_rng
 
 from .faiss_index import FaissIndex
-from .interpolation import available_interpolations
+from .interpolation import PREFERRED_INTERPOLATOR, available_interpolations
 from .initialization import random_hypertensors, reseed_tensor_around_sample
 from .hypertensor import Hypertensor, LocalResult
 
 WeightMode = Literal["softmax", "inverse"]
 LossMode = Literal["mse", "logits_ce"]
+
+
+@dataclass(frozen=True)
+class ModelStepMetrics:
+    """Lightweight telemetry captured after each predict/update call."""
+
+    active_count: int
+    max_abs_distance: float
+    mean_abs_distance: float
 
 
 def locality_weights(
@@ -50,7 +59,8 @@ def locality_weights(
         raise ValueError(f"Unsupported weight mode: {mode}")
     weights_sum = weights.sum()
     if weights_sum == 0.0:
-        raise ValueError("All locality weights collapsed to zero")
+        weights = np.ones_like(weights)
+        weights_sum = weights.sum()
     return (weights / weights_sum).astype(np.float32)
 
 
@@ -59,8 +69,8 @@ class HTFRModel:
     """Hypertensor Field Regressor model."""
 
     tensors: List[Hypertensor] = field(default_factory=list)
-    top_k: int = 64
-    train_top_k: int = 1024
+    top_k: int = 32
+    train_top_k: int = 128
     weight_mode: WeightMode = "softmax"
     epsilon: float = 1e-6
     eta: float = 0.05
@@ -77,18 +87,27 @@ class HTFRModel:
     relocation_interval: int = 32
     usage_decay: float = 0.995
     faiss_probe_multiplier: int = 4
+    distance_mode: Literal["planar", "euclidean", "hybrid", "hybrid_exp"] = "hybrid_exp"
+    distance_exp_lambda: float = 1.0
+    distance_clip: float = 1e6
 
     def __post_init__(self) -> None:
         if self.interpolation_reference is None:
             self.interpolation_reference = 5.0 * self.max_knn_radius
         if self.locality_radius is None:
             self.locality_radius = self.interpolation_reference
+        interpolators = available_interpolations()
+        preferred = (
+            PREFERRED_INTERPOLATOR
+            if PREFERRED_INTERPOLATOR in interpolators
+            else interpolators[0]
+        )
         if not self.interpolation_weights:
             self.interpolation_weights = {
-                name: 1.0 for name in available_interpolations()
+                name: (1.0 if name == preferred else 0.0) for name in interpolators
             }
         else:
-            for name in available_interpolations():
+            for name in interpolators:
                 self.interpolation_weights.setdefault(name, 0.0)
         for tensor in self.tensors:
             self._configure_tensor(tensor)
@@ -100,11 +119,13 @@ class HTFRModel:
         self._usage_counts = np.zeros(len(self.tensors), dtype=np.float32)
         self._avg_distance = np.zeros(len(self.tensors), dtype=np.float32)
         self._loss_trace = np.zeros(len(self.tensors), dtype=np.float32)
+        self._update_counts = np.zeros(len(self.tensors), dtype=np.int64)
         self._error_queue: Deque[tuple[np.ndarray, float]] = deque(
             maxlen=self.max_error_queue
         )
         self._faiss_index: FaissIndex | None = None
         self._faiss_dirty = False
+        self._last_step_metrics: ModelStepMetrics | None = None
         if self.tensors:
             self._ensure_faiss_index(force_init=True)
 
@@ -185,20 +206,22 @@ class HTFRModel:
                 x_arr, max(k * self.faiss_probe_multiplier, k)
             )
             candidate_indices = [int(idx) for idx in indices if idx >= 0]
-        cache: List[Tuple[int, LocalResult]] = []
-        fallback: List[Tuple[int, LocalResult]] = []
+        cache: List[Tuple[int, LocalResult, float]] = []
+        fallback: List[Tuple[int, LocalResult, float]] = []
         evaluated: set[int] = set()
 
         def evaluate(idx: int) -> None:
             tensor = self.tensors[idx]
             local = tensor.local(x_arr)
+            metric_distance = self._distance_value(tensor, local, x_arr)
+            entry = (idx, local, metric_distance)
             if (
                 self.locality_radius is not None
                 and abs(local.distance) > self.locality_radius
             ):
-                fallback.append((idx, local))
+                fallback.append(entry)
             else:
-                cache.append((idx, local))
+                cache.append(entry)
 
         for idx in candidate_indices:
             if 0 <= idx < len(self.tensors) and idx not in evaluated:
@@ -225,12 +248,13 @@ class HTFRModel:
 
     def predict(self, x: np.ndarray) -> np.ndarray:
         active = self._select_active(np.asarray(x, dtype=np.float32), self.top_k)
-        distances = [entry[1].distance for entry in active]
-        taus = [self.tensors[idx].tau for idx, _ in active]
+        distances = [entry[2] for entry in active]
+        planar_distances = [entry[1].distance for entry in active]
+        taus = [self.tensors[idx].tau for idx, _, _ in active]
         loc_weights = locality_weights(distances, taus, self.weight_mode, self.epsilon)
         outputs = np.stack([entry[1].value for entry in active]).astype(np.float32)
         yhat = loc_weights @ outputs
-        self._record_activity([idx for idx, _ in active], distances, loss_value=None)
+        self._record_activity([idx for idx, _, _ in active], planar_distances, loss_value=None)
         return yhat.astype(self.dtype)
 
     def _loss_gradient(self, yhat: np.ndarray, y: np.ndarray, mode: LossMode) -> np.ndarray:
@@ -264,8 +288,9 @@ class HTFRModel:
             x_arr,
             self.train_top_k if train else self.top_k,
         )
-        distances = [entry[1].distance for entry in active]
-        taus = [self.tensors[idx].tau for idx, _ in active]
+        distances = [entry[2] for entry in active]
+        planar_distances = [entry[1].distance for entry in active]
+        taus = [self.tensors[idx].tau for idx, _, _ in active]
         loc_weights = locality_weights(distances, taus, self.weight_mode, self.epsilon)
         outputs = np.stack([entry[1].value for entry in active]).astype(np.float32)
         yhat = loc_weights @ outputs
@@ -280,7 +305,7 @@ class HTFRModel:
                 target_index = None
             loss_value = self._compute_loss_value(yhat, y_arr, target_index, loss)
             grad = self._loss_gradient(yhat.astype(np.float32), y_arr, loss).astype(np.float32)
-            for loc_w, (tensor_idx, local) in zip(loc_weights, active):
+            for loc_w, (tensor_idx, local, _) in zip(loc_weights, active):
                 tensor = self.tensors[tensor_idx]
                 control = tensor.C.astype(np.float32)
                 control -= self.eta * loc_w * np.outer(grad, local.weights.astype(np.float32))
@@ -294,7 +319,8 @@ class HTFRModel:
                     tensor.delta = np.dtype(tensor.dtype).type(
                         float(tensor.delta) - self.eta_g * loc_w * coeff
                     )
-        self._record_activity([idx for idx, _ in active], distances, loss_value)
+                self._update_counts[tensor_idx] += 1
+        self._record_activity([idx for idx, _, _ in active], planar_distances, loss_value)
         if loss_value is not None:
             self._enqueue_error(x_arr, loss_value)
         if train:
@@ -332,10 +358,21 @@ class HTFRModel:
         self._loss_trace = np.concatenate(
             [self._loss_trace, np.zeros(count, dtype=np.float32)]
         )
+        self._update_counts = np.concatenate(
+            [self._update_counts, np.zeros(count, dtype=np.int64)]
+        )
 
     def _record_activity(
         self, indices: Sequence[int], distances: Sequence[float], loss_value: float | None
     ) -> None:
+        abs_distances = [abs(distance) for distance in distances]
+        max_abs = max(abs_distances) if abs_distances else 0.0
+        mean_abs = float(np.mean(abs_distances)) if abs_distances else 0.0
+        self._last_step_metrics = ModelStepMetrics(
+            active_count=len(indices),
+            max_abs_distance=max_abs,
+            mean_abs_distance=mean_abs,
+        )
         for tensor_idx, distance in zip(indices, distances):
             self._usage_counts[tensor_idx] = (
                 self.usage_decay * self._usage_counts[tensor_idx] + 1.0
@@ -349,6 +386,11 @@ class HTFRModel:
                     self.usage_decay * self._loss_trace[tensor_idx]
                     + (1.0 - self.usage_decay) * loss_value
                 )
+
+    def last_step_metrics(self) -> ModelStepMetrics | None:
+        """Return telemetry from the most recent predict/update call."""
+
+        return self._last_step_metrics
 
     def _enqueue_error(self, x: np.ndarray, loss_value: float) -> None:
         if loss_value < self.error_threshold:
@@ -380,6 +422,64 @@ class HTFRModel:
         normal = np.asarray(tensor.n, dtype=np.float32)
         anchor = -float(tensor.delta) * normal
         return anchor.astype(np.float16)
+
+    def _euclidean_distance(self, tensor: Hypertensor, sample: np.ndarray) -> float:
+        anchor = self._tensor_anchor(tensor).astype(np.float32)
+        sample_arr = np.asarray(sample, dtype=np.float32)
+        return float(np.linalg.norm(sample_arr - anchor))
+
+    def _distance_value(
+        self,
+        tensor: Hypertensor,
+        local: LocalResult,
+        sample: np.ndarray,
+    ) -> float:
+        planar_abs = abs(local.distance)
+        if self.distance_mode == "planar":
+            return self._clip_distance(max(planar_abs, 1e-12))
+        euclid = max(self._euclidean_distance(tensor, sample), 1e-12)
+        if self.distance_mode == "euclidean":
+            return self._clip_distance(euclid)
+        base = self._geometric_distance(local.distance, euclid)
+        if self.distance_mode == "hybrid":
+            return self._clip_distance(base)
+        if self.distance_mode == "hybrid_exp":
+            lam = max(self.distance_exp_lambda, 1e-12)
+            ratio = math.sqrt(max(base / lam, 0.0))
+            value = float(base * math.exp(min(ratio, 60.0)))
+            return self._clip_distance(value)
+        raise ValueError(f"Unsupported distance mode: {self.distance_mode}")
+
+    def _clip_distance(self, value: float) -> float:
+        if not math.isfinite(value):
+            return self.distance_clip
+        return float(min(max(value, 1e-12), self.distance_clip))
+
+    def prune_unmodified(self) -> int:
+        """Remove Hypertensors that were never updated during training."""
+
+        if not self.tensors:
+            return 0
+        keep = np.nonzero(self._update_counts > 0)[0]
+        if keep.size == 0 or keep.size == len(self.tensors):
+            return 0
+        removed = len(self.tensors) - keep.size
+        self.tensors = [self.tensors[int(idx)] for idx in keep]
+        self._usage_counts = self._usage_counts[keep]
+        self._avg_distance = self._avg_distance[keep]
+        self._loss_trace = self._loss_trace[keep]
+        self._update_counts = self._update_counts[keep]
+        self._mark_faiss_dirty()
+        return removed
+
+    @staticmethod
+    def _geometric_distance(planar: float, euclidean: float, eps: float = 1e-12) -> float:
+        planar_abs = abs(planar)
+        if planar_abs <= 0.0:
+            planar_abs = eps
+        if euclidean <= 0.0:
+            euclidean = eps
+        return float(math.sqrt(planar_abs * euclidean))
 
     def _ensure_faiss_index(self, force_init: bool = False) -> None:
         if not self.tensors:
@@ -418,6 +518,9 @@ class HTFRModel:
         max_error_queue: int = 128,
         relocation_interval: int = 32,
         usage_decay: float = 0.995,
+        distance_mode: Literal["planar", "euclidean", "hybrid", "hybrid_exp"] = "hybrid_exp",
+        distance_exp_lambda: float = 1.0,
+        distance_clip: float = 1e6,
     ) -> "HTFRModel":
         default_top_k = cls.__dataclass_fields__["top_k"].default  # type: ignore[index]
         default_train_top_k = cls.__dataclass_fields__["train_top_k"].default  # type: ignore[index]
@@ -447,5 +550,8 @@ class HTFRModel:
             max_error_queue=max_error_queue,
             relocation_interval=relocation_interval,
             usage_decay=usage_decay,
+            distance_mode=distance_mode,
+            distance_exp_lambda=distance_exp_lambda,
+            distance_clip=distance_clip,
         )
         return model

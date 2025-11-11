@@ -1,8 +1,11 @@
 """Context building utilities for Hypertensor Field Transformer training."""
 from __future__ import annotations
 
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Optional, Protocol, Sequence
+import os
+from typing import Iterator, Optional, Protocol, Sequence
 
 import numpy as np
 
@@ -165,3 +168,105 @@ class TeacherWindowLike(Protocol):
     target_token: int
     logits: Optional[np.ndarray]
     rope_phases: Optional[np.ndarray]
+
+
+@dataclass(frozen=True)
+class ContextBatch:
+    """Materialized set of samples ready for projection."""
+
+    stage1_inputs: np.ndarray
+    stage1_targets: np.ndarray
+    tail_embeddings: np.ndarray
+    target_tokens: np.ndarray
+    weights: np.ndarray
+    sample_indices: np.ndarray
+    transfer_bytes: int
+
+    @property
+    def sample_count(self) -> int:
+        return int(self.stage1_inputs.shape[0])
+
+
+class ContextBatchProducer:
+    """Precomputes Stage-1 inputs/tails in worker threads for trainer batches."""
+
+    def __init__(
+        self,
+        builder: ContextBuilder,
+        samples: Sequence[ContextSample],
+        batch_size: int,
+        *,
+        max_workers: Optional[int] = None,
+        prefetch_batches: Optional[int] = None,
+    ) -> None:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        self.builder = builder
+        self.samples = samples
+        self.batch_size = batch_size
+        cpu_count = max(1, _safe_cpu_count())
+        if max_workers is None or max_workers <= 0:
+            self.max_workers = min(4, cpu_count)
+        else:
+            self.max_workers = max(1, max_workers)
+        if prefetch_batches is None or prefetch_batches <= 0:
+            self.prefetch_batches = max(2, self.max_workers * 2)
+        else:
+            self.prefetch_batches = prefetch_batches
+
+    def __iter__(self) -> Iterator[ContextBatch]:
+        total = len(self.samples)
+        if total == 0:
+            return
+        futures: deque[Future[ContextBatch]] = deque()
+        cursor = 0
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            while cursor < total or futures:
+                while cursor < total and len(futures) < self.prefetch_batches:
+                    start = cursor
+                    end = min(total, start + self.batch_size)
+                    futures.append(executor.submit(self._build_batch, start, end))
+                    cursor = end
+                future = futures.popleft()
+                yield future.result()
+
+    def _build_batch(self, start: int, end: int) -> ContextBatch:
+        size = end - start
+        stage1_inputs = np.empty((size, self.builder.raw_dim), dtype=np.float32)
+        stage1_targets = np.empty((size, self.builder.stage1_target_dim), dtype=np.float32)
+        tail_dim = self.builder.tail_raw_dim
+        tail_embeddings = (
+            np.zeros((size, tail_dim), dtype=np.float32)
+            if tail_dim == 0
+            else np.empty((size, tail_dim), dtype=np.float32)
+        )
+        target_tokens = np.empty(size, dtype=np.int64)
+        weights = np.empty(size, dtype=np.float32)
+        indices = np.arange(start, end, dtype=np.int64)
+        for offset, sample_idx in enumerate(range(start, end)):
+            sample = self.samples[sample_idx]
+            stage1_inputs[offset] = self.builder.build_stage1_input(sample.signals)
+            stage1_targets[offset] = np.asarray(sample.stage1_target, dtype=np.float32)
+            if tail_dim:
+                tail_embeddings[offset] = self.builder.build_tail_embeddings(sample.signals)
+            target_tokens[offset] = int(sample.target_token)
+            weights[offset] = float(sample.weight)
+        transfer_bytes = (
+            stage1_inputs.nbytes + stage1_targets.nbytes + tail_embeddings.nbytes
+        )
+        return ContextBatch(
+            stage1_inputs=stage1_inputs,
+            stage1_targets=stage1_targets,
+            tail_embeddings=tail_embeddings,
+            target_tokens=target_tokens,
+            weights=weights,
+            sample_indices=indices,
+            transfer_bytes=transfer_bytes,
+        )
+
+
+def _safe_cpu_count() -> int:
+    try:
+        return os.cpu_count() or 1
+    except Exception:  # pragma: no cover - defensive path
+        return 1

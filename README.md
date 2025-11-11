@@ -28,15 +28,17 @@ HTFR is a research stack for building Hypertensor fields—collections of orient
 | `tests/` | Pytest suite covering Hypertensor math, projection stacks, checkpoint I/O, and trainer glue. |
 
 ## Environment Setup
-1. Use Python 3.10+ with system packages required by PyTorch/ROCm for your platform.
-2. Populate `.env` with any secrets or GPU configuration you want inherited by the helper scripts (e.g., `HF_TOKEN`, `ROCM_VISIBLE_DEVICES`).
+1. Use Python 3.10+ with system packages required by PyTorch/ROCm for your platform (the Radeon RX 7900 XTX path requires gfx1100-capable drivers plus `rocminfo` utilities).
+2. Populate `.env` with any secrets or GPU configuration you want inherited by the helper scripts (e.g., `HF_TOKEN`, `ROCM_VISIBLE_DEVICES`, `HSA_OVERRIDE_GFX_VERSION`, `HIP_VISIBLE_DEVICES`).
 3. Run the provisioning script from the repo root:
    ```bash
-   agents/setup_env.sh
+   ROCM_AVAILABLE=1 agents/setup_env.sh
    ```
    - Installs the project in editable mode with `benchmark`, `dev`, and `rocm` extras (override via `HTFR_SETUP_EXTRAS`).
-   - Optionally reinstall the nightly ROCm wheel set when `HTFR_INSTALL_ROCM_TORCH=1` (default). Set `HTFR_ROCM_INDEX_URL` to point at a different PyTorch package mirror or disable the flag to keep CPU/CUDA wheels.
+   - ROCm nightlies are only installed when both `HTFR_INSTALL_ROCM_TORCH=1` **and** `ROCM_AVAILABLE=1`. Leave `ROCM_AVAILABLE` unset (or `0`) on hosts without HIP support to avoid destructive wheel swaps.
+   - Set `HTFR_ROCM_INDEX_URL` to point at a different PyTorch package mirror or disable `HTFR_INSTALL_ROCM_TORCH` to keep CPU/CUDA wheels.
 4. Activate `.venv/bin/activate` when working manually, or rely on the helper scripts which activate it for you.
+5. When GPU hardware is sandboxed, run `agents/human_eval.sh` to print the manual ROCm test plan (set `RUN_HUMAN_EVAL=1` to execute a short sanity run on a developer workstation).
 
 ## Training the Hypertensor Field Transformer
 The main entry point is `examples/train_htft.py`. It orchestrates teacher capture, context generation, trainer loops, checkpoint saves, and optional metrics logging.
@@ -63,17 +65,24 @@ python examples/train_htft.py \
 - `--stage1-target-dim`: embedding dimension produced by Stage 1 and consumed by Stage 2.
 - `--tail-tokens`: number of trailing tokens whose raw embeddings are concatenated onto the Stage 2 input.
 - `--vocab-limit`: size of the compact shortlist used for truncated logits; the `build_vocab_mapping` helper maps full-token IDs into this range plus the `unk_index`.
+- `--batch-size` / `--batch-workers`: control the CPU producer pool that materializes Stage 1 features before Hypertensor updates.
+- `--pipeline`: overlaps Stage 1 and Stage 2 updates with a double buffer so Stage 1 can prepare sample *n + 1* while Stage 2 finishes sample *n*. Use `--stage1-device` / `--stage2-device` to annotate the intended device topology in checkpoints/logs.
 - `--train-top-k / --stage*-tau / --stage*-eta / --stage*-eta-g`: optimizer knobs forwarded to each Hypertensor stage.
 - `--max-train-examples` / `--max-eval-examples`: cap on teacher windows obtained from each stream to avoid exhausting VRAM.
+- `--profile-output`: write per-section/batch profiling data (JSONL) recording wall-clock timings for the entire pipeline (teacher capture, training batches, evaluation, etc.).
+- Hypertensors that never receive an update during the epoch are automatically pruned before evaluation/checkpointing, keeping the model sparse.
+- Interpolation modules default to the highest-quality Hermite variant; other interpolators are disabled unless you explicitly override `HTFRModel.interpolation_weights`.
 
 All CLI options are documented via `python examples/train_htft.py --help`; run this command after editing the script to ensure argument parsing still works.
 
 ## Monitoring and Benchmarking
-When `--metrics-path` is provided, every evaluation pass appends a JSON line describing step counts, train/eval perplexity, and (optionally) the truncated teacher perplexity baseline. Summaries are available via:
+When `--metrics-path` is provided, every evaluation pass appends a JSON line describing step counts, train/eval perplexity, truncated teacher perplexity, and batch instrumentation (Stage 1/Stage 2 rates plus host↔device transfer volumes). Summaries are available via:
 ```bash
 agents/benchmark_htft.sh logs/train_metrics.jsonl
 ```
 The script reports best vs. final student perplexity and the student/teacher gap so you can compare runs without reloading massive checkpoints.
+
+For low-level timing, pass `--profile-output logs/profile.jsonl` to `examples/train_htft.py`. Each JSON line captures the duration of a pipeline section (`section:Collecting teacher windows`, etc.), every training/eval batch, and epoch totals with stage timings so you can diagnose bottlenecks offline.
 
 ## Checkpoints and Resuming
 Checkpoints saved by `save_htft_checkpoint` are self-contained `.npz` archives.
@@ -95,7 +104,7 @@ You can reconstruct an `HypertensorFieldTransformer` from a checkpoint by creati
 ## Testing and Quality Gates
 - **Syntax check:** `python -m compileall htfr examples`
 - **Pytest + coverage:** `agents/test_project.sh` (wraps compileall + `pytest --cov` and writes `coverage.xml`).
-- **CLI smoke tests:** run `python examples/train_htft.py --help` and `python examples/benchmark_htft.py --help` after editing argument definitions to ensure argparse wiring is intact.
+- **CLI smoke tests:** run `python examples/train_htft.py --help` and `python examples/benchmark_htft.py --help` after editing argument definitions to ensure argparse wiring is intact. For GPU parity checks, follow `agents/human_eval.sh`.
 - **Style:** follow PEP 8 and keep logging concise—training output is streamed every few seconds, so favor short single-line messages.
 
 ## Extending the Project

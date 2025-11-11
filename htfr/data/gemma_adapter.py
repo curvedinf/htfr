@@ -11,6 +11,8 @@ from datasets import DatasetDict, load_dataset
 from huggingface_hub import login
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from htfr.devices import describe_device, get_preferred_device
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,17 +51,19 @@ def ensure_authentication(token: Optional[str]) -> None:
     login(token=token, add_to_git_credential=False)
 
 
-def load_teacher(model_id: str, token: Optional[str], device: Optional[str] = None) -> Tuple[AutoTokenizer, AutoModelForCausalLM, torch.device]:
+def load_teacher(
+    model_id: str, token: Optional[str], device: Optional[str] = None
+) -> Tuple[AutoTokenizer, AutoModelForCausalLM, torch.device]:
     """Load the tokenizer/model pair for the teacher."""
 
     logger.info("Loading teacher model '%s'.", model_id)
     tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
     model = AutoModelForCausalLM.from_pretrained(model_id, token=token)
-    device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    model.to(device)
+    device_obj = get_preferred_device(device)
+    model.to(device_obj)
     model.eval()
-    logger.info("Teacher model ready on %s.", device)
-    return tokenizer, model, device
+    logger.info("Teacher model ready on %s.", describe_device(device_obj))
+    return tokenizer, model, device_obj
 
 
 def load_dataset_split(dataset: str, config: str) -> DatasetDict:
@@ -112,14 +116,14 @@ def collect_teacher_windows(
 ) -> List[TeacherWindow]:
     """Run the teacher and capture hidden states/logits per context window."""
 
-    device = torch.device(config.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    device = get_preferred_device(config.device)
     logger.info(
         "Collecting %s teacher windows (seq_len=%d stride=%d max_examples=%d device=%s).",
         phase,
         config.seq_len,
         config.stride,
         config.max_examples,
-        device,
+        describe_device(device),
     )
     windows: List[TeacherWindow] = []
     max_start = tokens.size(0) - config.seq_len - 1

@@ -19,8 +19,8 @@ def _make_stage_state(rng: np.random.Generator) -> StageState:
     )
     model = HTFRModel(
         tensors=tensors,
-        top_k=64,
-        train_top_k=1024,
+        top_k=32,
+        train_top_k=128,
         eta=0.01,
         eta_g=0.001,
         randomize_interpolations=False,
@@ -47,6 +47,6 @@ def test_htft_checkpoint_roundtrip(tmp_path: Path) -> None:
     loaded = load_htft_checkpoint(tmp_path / "model.npz")
     assert loaded.mapping.shape == mapping.shape
     assert loaded.shortlist.shape == shortlist.shape
-    assert loaded.stage1.model.top_k == 64
-    assert loaded.stage1.model.train_top_k == 1024
+    assert loaded.stage1.model.top_k == 32
+    assert loaded.stage1.model.train_top_k == 128
     assert loaded.stage2.model.tensors[0].C.shape[1] == 3

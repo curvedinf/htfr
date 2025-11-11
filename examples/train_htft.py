@@ -36,6 +36,7 @@ from htfr.hypertensor_field_transformer import HypertensorFieldTransformer, Stag
 from htfr.initialization import random_hypertensors
 from htfr.model import HTFRModel
 from htfr.trainer import HTFTTrainer
+from htfr.profiler import PipelineProfiler
 
 LOGGER_NAME = "train_htft"
 logger = logging.getLogger(LOGGER_NAME)
@@ -55,7 +56,7 @@ def _configure_logging() -> None:
 
 
 @contextmanager
-def log_section(name: str):
+def log_section(name: str, profiler: PipelineProfiler | None = None):
     """Context manager that logs the start/end (with duration) of a section."""
 
     logger.info("Starting %s", name)
@@ -65,6 +66,8 @@ def log_section(name: str):
     finally:
         duration = time.perf_counter() - start
         logger.info("Finished %s in %.2f s", name, duration)
+        if profiler is not None:
+            profiler.record(f"section:{name}", duration, {})
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,7 +100,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stage2-tau", type=float, default=0.8, help="Stage-2 tau")
     parser.add_argument("--metrics-path", type=str, default=None, help="Optional JSONL metrics output")
     parser.add_argument("--output", type=str, default=None, help="Optional checkpoint path (.npz)")
+    parser.add_argument("--profile-output", type=str, default=None, help="Optional JSONL profiling output")
     parser.add_argument("--seed", type=int, default=17, help="Random seed")
+    parser.add_argument("--batch-size", type=int, default=32, help="Trainer batch size for context processing")
+    parser.add_argument(
+        "--batch-workers",
+        type=int,
+        default=8,
+        help="CPU workers for batch preparation (0=auto)",
+    )
+    parser.add_argument(
+        "--pipeline",
+        action="store_true",
+        help="Enable Stage1/Stage2 overlap with a double-buffered pipeline",
+    )
+    parser.add_argument(
+        "--stage1-device",
+        type=str,
+        default="hip:0",
+        help="Logical device assignment for Stage 1 (metadata only for now)",
+    )
+    parser.add_argument(
+        "--stage2-device",
+        type=str,
+        default="hip:0",
+        help="Logical device assignment for Stage 2 (metadata/logging)",
+    )
     parser.add_argument(
         "--log-interval-seconds",
         type=float,
@@ -110,6 +138,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     _configure_logging()
     args = parse_args()
+    profiler = PipelineProfiler(args.profile_output)
     logger.info(
         "HTFT training start | model=%s dataset=%s/%s seq_len=%d stride=%d seed=%d",
         args.model,
@@ -120,20 +149,20 @@ def main() -> None:
         args.seed,
     )
 
-    with log_section("Authenticating with Hugging Face Hub"):
+    with log_section("Authenticating with Hugging Face Hub", profiler):
         ensure_authentication(args.hf_token)
 
-    with log_section(f"Loading teacher model and tokenizer ({args.model})"):
+    with log_section(f"Loading teacher model and tokenizer ({args.model})", profiler):
         tokenizer, model, device = load_teacher(args.model, args.hf_token)
 
-    with log_section(f"Loading dataset splits ({args.dataset}/{args.dataset_config})"):
+    with log_section(f"Loading dataset splits ({args.dataset}/{args.dataset_config})", profiler):
         dataset = load_dataset_split(args.dataset, args.dataset_config)
 
-    with log_section("Building train token stream"):
+    with log_section("Building train token stream", profiler):
         train_tokens = build_token_stream(
             dataset["train"]["text"], tokenizer, args.train_tokens + args.seq_len + 1
         )
-    with log_section("Building eval token stream"):
+    with log_section("Building eval token stream", profiler):
         eval_tokens = build_token_stream(
             dataset["validation"]["text"], tokenizer, args.eval_tokens + args.seq_len + 1
         )
@@ -154,9 +183,9 @@ def main() -> None:
         collect_logits=True,
         device=str(device),
     )
-    with log_section("Collecting teacher windows (train)"):
+    with log_section("Collecting teacher windows (train)", profiler):
         train_windows = collect_teacher_windows(model, train_tokens, gemma_train_cfg, phase="train")
-    with log_section("Collecting teacher windows (eval)"):
+    with log_section("Collecting teacher windows (eval)", profiler):
         eval_windows = collect_teacher_windows(model, eval_tokens, gemma_eval_cfg, phase="eval")
 
     mapping, shortlist = build_vocab_mapping(
@@ -258,17 +287,47 @@ def main() -> None:
             log_interval_seconds,
         )
         log_interval_seconds = 10.0
+    batch_workers = args.batch_workers if args.batch_workers > 0 else None
     trainer = HTFTTrainer(
         hypertensor_transformer,
         builder,
         log_interval_seconds=log_interval_seconds,
+        batch_size=max(1, args.batch_size),
+        batch_workers=batch_workers,
+        pipeline_enabled=args.pipeline,
+        stage_devices={
+            "stage1": args.stage1_device or "cpu",
+            "stage2": args.stage2_device or "cpu",
+        },
+        profiler=profiler,
     )
-    with log_section("Training hypertensor transformer"):
+    logger.info(
+        "Batch config | batch_size=%d workers=%s pipeline=%s stage_devices=(%s, %s)",
+        max(1, args.batch_size),
+        batch_workers if batch_workers is not None else "auto",
+        args.pipeline,
+        args.stage1_device or "cpu",
+        args.stage2_device or "cpu",
+    )
+    with log_section("Training hypertensor transformer", profiler):
         train_metrics = trainer.train_epoch(train_samples)
-    with log_section("Evaluating hypertensor transformer"):
+    pruned_stage1 = stage1_state.model.prune_unmodified()
+    pruned_stage2 = stage2_state.model.prune_unmodified()
+    if pruned_stage1 or pruned_stage2:
+        logger.info(
+            "Pruned inactive hypertensors | stage1=%d stage2=%d",
+            pruned_stage1,
+            pruned_stage2,
+        )
+        profiler.record(
+            "prune_inactive_tensors",
+            0.0,
+            {"stage1_removed": pruned_stage1, "stage2_removed": pruned_stage2},
+        )
+    with log_section("Evaluating hypertensor transformer", profiler):
         eval_metrics = trainer.evaluate(eval_samples)
 
-    teacher_logits = np.stack([window.logits for window in eval_windows if window.logits is not None])
+        teacher_logits = np.stack([window.logits for window in eval_windows if window.logits is not None])
     teacher_targets = np.array([window.target_token for window in eval_windows], dtype=np.int64)
     teacher_ppl = truncated_teacher_perplexity(teacher_logits, teacher_targets, shortlist, mapping)
     logger.info("Teacher perplexity (truncated vocab): %.3f", teacher_ppl)
@@ -281,6 +340,7 @@ def main() -> None:
         "teacher_perplexity": teacher_ppl,
     }
     logger.info("Training metrics:\n%s", json.dumps(metrics_payload, indent=2))
+    profiler.record("metrics", 0.0, metrics_payload)
     if args.metrics_path:
         pathlib.Path(args.metrics_path).parent.mkdir(parents=True, exist_ok=True)
         with open(args.metrics_path, "a", encoding="utf-8") as fh:
@@ -294,13 +354,23 @@ def main() -> None:
                 model=stage1_state.model,
                 srht=tuple(stage1_state.srht_params),
                 countsketch=stage1_state.countsketch,
-                metadata={"stage": 1},
+                metadata={
+                    "stage": 1,
+                    "device": args.stage1_device or "cpu",
+                    "pipeline": "producer" if args.pipeline else "sequential",
+                    "batch_size": max(1, args.batch_size),
+                },
             ),
             stage2=StageState(
                 model=stage2_state.model,
                 srht=tuple(stage2_state.srht_params),
                 countsketch=stage2_state.countsketch,
-                metadata={"stage": 2},
+                metadata={
+                    "stage": 2,
+                    "device": args.stage2_device or "cpu",
+                    "pipeline": "consumer" if args.pipeline else "sequential",
+                    "batch_size": max(1, args.batch_size),
+                },
             ),
             mapping=mapping,
             shortlist=shortlist,
@@ -317,6 +387,7 @@ def main() -> None:
         pathlib.Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         save_htft_checkpoint(args.output, checkpoint)
         logger.info("Checkpoint saved to %s", args.output)
+    profiler.flush()
 
 
 @dataclass
@@ -361,8 +432,8 @@ def _build_stage_state(
     )
     model = HTFRModel(
         tensors=tensors,
-        top_k=64,
-        train_top_k=1024,
+        top_k=32,
+        train_top_k=128,
         eta=eta,
         eta_g=eta_g,
         weight_mode="softmax",

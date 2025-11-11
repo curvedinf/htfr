@@ -351,6 +351,8 @@ class _WaveletModule:
         )
 
 
+PREFERRED_INTERPOLATOR = "hermite"
+
 _MODULES: Dict[str, InterpolationModule] = {
     module.name: module
     for module in (
@@ -376,4 +378,3 @@ def available_interpolations() -> tuple[str, ...]:
     """Return the names of all registered interpolation modules."""
 
     return tuple(_MODULES.keys())
-

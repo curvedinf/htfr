@@ -1,0 +1,6 @@
+{"step": 64, "train_loss": 8.317771092057228, "train_perplexity": 4096.020174233657, "eval_loss": 8.317286342382431, "eval_perplexity": 4094.0351109544954, "teacher_perplexity": 11.477442741394043}
+{"step": 64, "train_loss": 8.317924737930298, "train_perplexity": 4096.6495591794, "eval_loss": 8.316959202289581, "eval_perplexity": 4092.6960069774104, "teacher_perplexity": 11.477442741394043}
+{"step": 64, "train_loss": 8.322346940636635, "train_perplexity": 4114.805889845651, "eval_loss": 8.32639655470848, "eval_perplexity": 4131.503051391686, "teacher_perplexity": 11.477442741394043}
+{"step": 64, "train_loss": 8.31982097029686, "train_perplexity": 4104.425128481184, "eval_loss": 8.314004361629486, "eval_perplexity": 4080.6205916566264, "teacher_perplexity": 11.477442741394043}
+{"step": 64, "train_loss": 8.321317985653877, "train_perplexity": 4110.574117347279, "eval_loss": 8.31107634305954, "eval_perplexity": 4068.6899339048255, "teacher_perplexity": 11.477442741394043}
+{"step": 512, "train_loss": 8.31722054257989, "train_perplexity": 4093.7657331151972, "eval_loss": 8.31562276929617, "eval_perplexity": 4087.230046260343, "teacher_perplexity": 17.26060676574707}
