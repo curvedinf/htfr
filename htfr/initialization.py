@@ -58,6 +58,7 @@ def initialize_hypertensors(
     outputs: np.ndarray,
     k: int,
     tau: float = 1.0,
+    reference_radius: float | None = None,
     rng: np.random.Generator | None = None,
 ) -> List[HyperTensor]:
     """Construct an initial set of HyperTensors following the whitepaper."""
@@ -87,6 +88,16 @@ def initialize_hypertensors(
         C = np.stack(
             [local_mean, local_mean, local_mean], axis=-1
         ).astype(np.float32)
-        tensors.append(HyperTensor(direction, offset, dneg, dpos, C, tau=tau))
+        tensors.append(
+            HyperTensor(
+                direction,
+                offset,
+                dneg,
+                dpos,
+                C,
+                tau=tau,
+                reference_radius=reference_radius if reference_radius is not None else 5.0,
+            )
+        )
     return tensors
 
