@@ -41,20 +41,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="google/gemma-3-270m")
     parser.add_argument("--dataset", default="wikitext")
     parser.add_argument("--dataset-config", default="wikitext-2-raw-v1")
-    parser.add_argument("--train-tokens", type=int, default=200_000)
-    parser.add_argument("--eval-tokens", type=int, default=50_000)
+    parser.add_argument("--train-tokens", type=int, default=2_000_000)
+    parser.add_argument("--eval-tokens", type=int, default=200_000)
     parser.add_argument("--seq-len", type=int, default=128)
-    parser.add_argument("--stride", type=int, default=128)
+    parser.add_argument("--stride", type=int, default=64)
     parser.add_argument("--max-train-examples", type=int, default=65_536)
     parser.add_argument("--max-eval-examples", type=int, default=16_384)
     parser.add_argument("--vocab-limit", type=int, default=4096)
     parser.add_argument("--output", required=True, help="Path to the output checkpoint (.npz)")
     parser.add_argument("--metadata", type=str, default=None, help="Optional JSON metadata to include")
-    parser.add_argument("--init-samples", type=int, default=100_000)
-    parser.add_argument("--init-tensors", type=int, default=650)
-    parser.add_argument("--srht-dim", type=int, default=4096)
-    parser.add_argument("--srht-block", type=int, default=256)
-    parser.add_argument("--top-k", type=int, default=16)
+    parser.add_argument("--init-samples", type=int, default=500_000)
+    parser.add_argument("--init-tensors", type=int, default=1_200)
+    parser.add_argument("--srht-dim", type=int, default=8_192)
+    parser.add_argument("--srht-block", type=int, default=128)
+    parser.add_argument("--top-k", type=int, default=24)
+    parser.add_argument("--train-epochs", type=int, default=2, help="Number of passes over the projected features")
     parser.add_argument("--eta", type=float, default=0.02)
     parser.add_argument("--eta-g", type=float, default=0.002)
     parser.add_argument("--seed", type=int, default=17)
@@ -73,9 +74,17 @@ def train_model(
     model: HTFRModel,
     features: np.ndarray,
     targets: np.ndarray,
+    epochs: int = 1,
+    rng: np.random.Generator | None = None,
 ) -> None:
-    for vec, cls in zip(features, targets):
-        model.predict_and_update(vec, int(cls), loss="logits_ce", train=True)
+    if rng is None:
+        rng = np.random.default_rng()
+    num_samples = features.shape[0]
+    indices = np.arange(num_samples)
+    for _ in range(max(1, epochs)):
+        rng.shuffle(indices)
+        for idx in indices:
+            model.predict_and_update(features[idx], int(targets[idx]), loss="logits_ce", train=True)
 
 
 def evaluate_model(
@@ -192,7 +201,13 @@ def main() -> None:
         eta_g=args.eta_g,
     )
     log("Training HTFR model...")
-    train_model(model, train_features, train_targets_compact)
+    train_model(
+        model,
+        train_features,
+        train_targets_compact,
+        epochs=args.train_epochs,
+        rng=rng,
+    )
     log("Evaluating trained model...")
     ppl = evaluate_model(model, eval_features, eval_targets_compact)
     log(f"HTFR perplexity: {ppl:.3f}")
@@ -219,6 +234,7 @@ def main() -> None:
         "init_tensors": args.init_tensors,
         "trained_tensors": len(model.tensors),
         "seed": args.seed,
+        "train_epochs": args.train_epochs,
     }
     if args.metadata:
         metadata.update(json.loads(args.metadata))

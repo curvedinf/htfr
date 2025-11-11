@@ -36,10 +36,11 @@ size, vocabulary truncation, and the evaluation output path.
 ### Training the Gemma 3 test HTFR
 
 [`examples/train_test_htfr.py`](examples/train_test_htfr.py) distills a
-reusable HTFR checkpoint from Gemma 3 teacher activations. It uses the
-SRHT plan described above (default SRHT dim 4096, 650 HyperTensors,
-16-way gating) and produces a single `.npz` bundle that the benchmark
-can reload. Follow the steps below to create a test model locally:
+reusable HTFR checkpoint from Gemma 3 teacher activations. The default
+configuration is now tuned for higher accuracy: 2M teacher tokens, SRHT
+dim 8192 (block size 128), 1.2k HyperTensors, and 24-way gating with two
+epochs of shuffled online updates. Follow the steps below to create a
+test model locally:
 
 1. **Accept the Gemma 3 license & grab a token.** Visit
    <https://huggingface.co/google/gemma-3-270m>, accept the license, and
@@ -50,9 +51,11 @@ can reload. Follow the steps below to create a test model locally:
    export HF_TOKEN=hf_xxx   # or pass --hf-token on the CLI
    ```
 
-   You can also drop the credential into a local `.env` file (for
-   example, `HF_TOKEN=hf_xxx`); the CLI scripts automatically load this
-   file from the repository root via `python-dotenv`.
+   You can also drop the credential and GPU/runtime toggles into a local
+   `.env` file (for example, `HF_TOKEN=hf_xxx`,
+   `ROCM_VISIBLE_DEVICES=0`). Both the Python entry points (via
+   `python-dotenv`) and the shell helpers in `agents/` source this file
+   so the environment applies uniformly.
 
 2. **Create an environment with the benchmark extras.** Any Python 3.10+
    environment works; install HTFR in editable mode so both the CLI
@@ -65,6 +68,28 @@ can reload. Follow the steps below to create a test model locally:
    pip install -e .[benchmark]
    ```
 
+   If you're running on an AMD GPU stack and already provisioned the
+   ROCm-focused dependencies from
+   `../gemma-3-270m-data-extraction-finetuner`, you can mirror that setup
+   here via the new `rocm` extra. The helper script below installs the
+   editable package with `benchmark`, `dev`, and `rocm` extras and, when
+   requested, pulls ROCm PyTorch wheels from AMD's nightly index:
+
+   ```bash
+   # Optional: tell the helper to install ROCm torch/vision/audio.
+   export HTFR_INSTALL_ROCM_TORCH=1
+   # Optional: override the AMD index if you track a different ROCm cut.
+   # export HTFR_ROCM_INDEX_URL="https://download.pytorch.org/whl/rocm6.1"
+   ./agents/setup_env.sh
+   ```
+
+   Behind the scenes the `rocm` extra brings in the same high-level stack
+   as the finetuner project (`optimum[amd]`, `accelerate`, `trl`, `peft`,
+   `unsloth`, `litellm`, etc.), so you can reuse shared benchmarking,
+   training, and evaluation tools across both repositories. Use
+   `HTFR_SETUP_EXTRAS` if you need to customize which extras the helper
+   installs (for example, `HTFR_SETUP_EXTRAS=benchmark,dev`).
+
 3. **(Optional) Warm the Gemma weights.** The first run downloads the
    model; doing a quick `python -c "from htfr.gemma import load_gemma_model; load_gemma_model('google/gemma-3-270m', '$HF_TOKEN')"`
    can populate the local cache up front, which avoids a long download in
@@ -72,22 +97,28 @@ can reload. Follow the steps below to create a test model locally:
 
 4. **Run the training script.** Provide an output path for the `.npz`
    checkpoint and tweak the token counts if you need a faster smoke
-   test. The defaults target a ~2.7M parameter HTFR:
+   test. The refreshed defaults target a ~5.0M parameter HTFR with
+   higher-fidelity features:
 
    ```bash
    python examples/train_test_htfr.py \
        --hf-token "$HF_TOKEN" \
        --output checkpoints/test_htfr_checkpoint.npz \
-       --train-tokens 200000 \
-       --eval-tokens 50000 \
+       --train-tokens 2000000 \
+       --eval-tokens 200000 \
        --seq-len 128 \
-       --srht-dim 4096 \
-       --top-k 16
+       --stride 64 \
+       --srht-dim 8192 \
+       --srht-block 128 \
+       --init-tensors 1200 \
+       --top-k 24 \
+       --train-epochs 2
    ```
 
-   For a laptop-friendly run, drop `--train-tokens` to ~50k and
-   `--init-tensors` to 256; the script scales linearly with these knobs
-   and automatically uses CUDA when available.
+   For a laptop-friendly run, lower `--train-tokens`, `--srht-dim`, and
+   `--init-tensors`, and keep `--train-epochs 1` to maintain turnaround.
+   The script scales almost linearly with each of these knobs and
+   automatically uses CUDA when available.
 
 5. **Use the checkpoint in the benchmark.** Pass the saved path through
    `--test-model` to compare it against Gemma inside
@@ -100,7 +131,8 @@ can reload. Follow the steps below to create a test model locally:
    ```
 
 The `.npz` archive stores the SRHT projection, trained HyperTensors, the
-truncated vocabulary mapping, and metadata describing the teacher setup.
+truncated vocabulary mapping, and metadata (including the new training
+epochs) describing the teacher setup.
 
 ---
 
